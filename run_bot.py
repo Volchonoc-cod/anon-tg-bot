@@ -132,7 +132,9 @@ def main():
         sys.exit(1)
 
 async def run_bot_async():
-    """Асинхронная версия для запуска из render_server.py"""
+    """
+    Асинхронная версия для запуска из render_server.py
+    """
     try:
         print("🤖 Запуск бота в асинхронном режиме...")
         
@@ -158,7 +160,11 @@ async def run_bot_async():
         inspector = inspect(engine)
         tables = inspector.get_table_names()
         print(f"📊 Таблицы в БД: {tables}")
+        
         # Инициализация бота
+        from aiogram import Bot, Dispatcher
+        from aiogram.fsm.storage.memory import MemoryStorage
+        
         bot = Bot(token=BOT_TOKEN)
         dp = Dispatcher(storage=MemoryStorage())
         
@@ -176,11 +182,11 @@ async def run_bot_async():
         dp.include_router(main_router)
         dp.include_router(debug_router)
         
-        logger.info("✅ Все роутеры зарегистрированы")
+        print("✅ Все роутеры зарегистрированы")
         
         # Получаем информацию о боте
         bot_info = await bot.get_me()
-        logger.info(f"✅ Bot: @{bot_info.username}")
+        print(f"✅ Bot: @{bot_info.username}")
         
         # Уведомление админам о запуске
         try:
@@ -194,17 +200,17 @@ async def run_bot_async():
             for admin_id in ADMIN_IDS:
                 await bot.send_message(admin_id, message, parse_mode="HTML")
         except Exception as e:
-            logger.error(f"❌ Ошибка уведомления: {e}")
+            print(f"❌ Ошибка уведомления: {e}")
         
         # Запуск поллинга
         await bot.delete_webhook(drop_pending_updates=True)
-        logger.info("🚀 Бот начал работу (поллинг)...")
+        print("🚀 Бот начал работу (поллинг)...")
         
         # Запускаем поллинг
         await dp.start_polling(bot)
         
     except Exception as e:
-        logger.error(f"❌ Критическая ошибка в run_bot_async: {e}")
+        print(f"❌ Критическая ошибка в run_bot_async: {e}")
         import traceback
         traceback.print_exc()
         raise
