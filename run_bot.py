@@ -136,22 +136,34 @@ async def run_bot_async():
     Асинхронная версия для запуска из render_server.py
     Эту функцию будет вызывать render_server.py
     """
+    
+        async def run_bot_async():
+    """Асинхронная версия для запуска из render_server.py"""
     try:
-        logger.info("🤖 Запуск бота в асинхронном режиме...")
+        print("🤖 Запуск бота в асинхронном режиме...")
+        
+        # Сначала импортируем ВСЕ модели
+        from app import models  # Это важно!
         
         from app.config import BOT_TOKEN, ADMIN_IDS, IS_RENDER
         from app.database import create_tables
-        from aiogram import Bot, Dispatcher
-        from aiogram.fsm.storage.memory import MemoryStorage
         
         # Создаем папки
+        import os
         os.makedirs('data', exist_ok=True)
         os.makedirs('backups', exist_ok=True)
         
-        # Создаем таблицы
+        # Создаем таблицы - ТЕПЕРЬ модели загружены
+        print("🔄 Создание таблиц БД...")
         create_tables()
-        logger.info("✅ Таблицы БД созданы")
+        print("✅ Таблицы БД созданы")
         
+        # Проверяем таблицы
+        from sqlalchemy import inspect
+        from app.database import engine
+        inspector = inspect(engine)
+        tables = inspector.get_table_names()
+        print(f"📊 Таблицы в БД: {tables}")
         # Инициализация бота
         bot = Bot(token=BOT_TOKEN)
         dp = Dispatcher(storage=MemoryStorage())
