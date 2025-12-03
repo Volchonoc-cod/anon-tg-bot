@@ -22,3 +22,11 @@ print(f"✅ Конфигурация загружена: Bot Token = {BOT_TOKEN[
 print(f"✅ Админы: {ADMIN_IDS}")
 print(f"✅ База данных: {DATABASE_URL}")
 print(f"✅ ЮMoney кошелек: {YOOMONEY_WALLET}")
+
+IS_RENDER = bool(os.getenv("RENDER"))
+PORT = int(os.getenv("PORT", 8080))
+
+print(f"✅ Конфигурация загружена")
+print(f"✅ Админы: {len(ADMIN_IDS)}")
+print(f"✅ Render: {IS_RENDER}")
+print(f"✅ Порт: {PORT}")
