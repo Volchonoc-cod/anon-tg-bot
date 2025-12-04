@@ -1146,6 +1146,43 @@ async def set_reveals_command(message: types.Message):
     except Exception as e:
         await message.answer(f"❌ Ошибка: {e}")
 
+
+@router.message(Command("backup_now"))
+async def backup_now_command(message: types.Message):
+    """Немедленное создание backup"""
+    if not is_admin(message.from_user.id):
+        await message.answer("❌ Доступ запрещен")
+        return
+    
+    await message.answer("🔄 Создаю резервную копию...")
+    
+    try:
+        from app.backup_service import backup_service
+        
+        # Создаем backup
+        backup_path = backup_service.create_backup()
+        
+        if backup_path:
+            backup_name = os.path.basename(backup_path)
+            file_size = os.path.getsize(backup_path)
+            file_size_mb = file_size / (1024 * 1024)
+            
+            await message.answer(
+                f"✅ <b>Backup создан!</b>\n\n"
+                f"📁 Файл: <code>{backup_name}</code>\n"
+                f"📦 Размер: {file_size_mb:.2f} MB\n"
+                f"⏰ Время: {datetime.now().strftime('%H:%M:%S')}\n\n"
+                f"📤 Файл автоматически отправлен в Telegram всем админам.",
+                parse_mode="HTML"
+            )
+        else:
+            await message.answer("❌ Ошибка создания backup")
+            
+    except Exception as e:
+        await message.answer(f"❌ Ошибка: {e}")
+
+
+
 @router.message(Command("payment_status"))
 async def payment_status_command(message: types.Message):
     """Статус платежной системы"""
