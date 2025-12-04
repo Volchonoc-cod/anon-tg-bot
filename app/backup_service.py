@@ -1,3 +1,4 @@
+
 import os
 import sqlite3
 import shutil
@@ -5,7 +6,11 @@ import asyncio
 from datetime import datetime
 from aiogram import Bot
 from app.config import BOT_TOKEN, ADMIN_IDS
-from app.database import DATA_DIR  # Импортируем DATA_DIR из database
+from app.database import DATA_DIR
+from aiogram.types import BufferedInputFile
+import logging
+
+logger = logging.getLogger(__name__)
 
 
 class BackupService:
@@ -64,6 +69,7 @@ class BackupService:
     def create_backup(self):
         """Создать резервную копию базы данных"""
         if not os.path.exists(self.db_path):
+            logger.error(f"❌ Файл базы данных не найден: {self.db_path}")
             return None
 
         # Создаем имя файла с датой
@@ -74,13 +80,79 @@ class BackupService:
         try:
             # Копируем файл базы данных
             shutil.copy2(self.db_path, backup_path)
-            print(f"✅ Резервная копия создана: {backup_filename}")
+            logger.info(f"✅ Резервная копия создана: {backup_filename}")
+            
+            # Автоматически отправляем в Telegram
+            asyncio.create_task(self.send_backup_to_telegram_async(backup_path))
+            
             return backup_path
         except Exception as e:
-            print(f"❌ Ошибка создания резервной копии: {e}")
+            logger.error(f"❌ Ошибка создания резервной копии: {e}")
             return None
 
-    asyncio.create_task(send_backup_to_telegram_async(backup_path))
+    async def send_backup_to_telegram_async(self, backup_path):
+        """Асинхронная отправка backup в Telegram"""
+        try:
+            if not BOT_TOKEN or not ADMIN_IDS:
+                logger.warning("⚠️ BOT_TOKEN или ADMIN_IDS не установлены, пропускаю отправку в Telegram")
+                return False
+                
+            bot = Bot(token=BOT_TOKEN)
+            backup_name = os.path.basename(backup_path)
+            file_size = os.path.getsize(backup_path)
+            file_size_mb = file_size / (1024 * 1024)
+            
+            # Читаем файл
+            with open(backup_path, 'rb') as f:
+                file_data = f.read()
+            
+            success_count = 0
+            error_count = 0
+            
+            for admin_id in ADMIN_IDS:
+                if not admin_id.strip():
+                    continue
+                    
+                try:
+                    admin_id_int = int(admin_id.strip())
+                    
+                    # Используем BufferedInputFile для aiogram 3.x
+                    input_file = BufferedInputFile(
+                        file=file_data,
+                        filename=backup_name
+                    )
+                    
+                    await bot.send_document(
+                        chat_id=admin_id_int,
+                        document=input_file,
+                        caption=(
+                            f"📦 <b>Автоматический backup базы</b>\n\n"
+                            f"📁 Файл: {backup_name}\n"
+                            f"📊 Размер: {file_size_mb:.2f} MB\n"
+                            f"⏰ Дата: {datetime.now().strftime('%d.%m.%Y %H:%M')}\n\n"
+                            f"💾 Сохраните для восстановления"
+                        ),
+                        parse_mode="HTML"
+                    )
+                    
+                    success_count += 1
+                    logger.info(f"✅ Backup автоматически отправлен админу {admin_id_int}")
+                    
+                    # Небольшая задержка между отправками
+                    await asyncio.sleep(0.5)
+                    
+                except Exception as e:
+                    error_count += 1
+                    logger.error(f"❌ Ошибка отправки админу {admin_id}: {e}")
+            
+            await bot.session.close()
+            
+            logger.info(f"📤 Итог отправки: успешно {success_count}, ошибок {error_count}")
+            return success_count > 0
+            
+        except Exception as e:
+            logger.error(f"❌ Ошибка автоматической отправки backup: {e}")
+            return False
 
     async def send_telegram_notification(self, message):
         """Отправить уведомление в Telegram (без файлов)"""
@@ -90,7 +162,7 @@ class BackupService:
             try:
                 await bot.send_message(admin_id, message, parse_mode="HTML")
             except Exception as e:
-                print(f"❌ Ошибка отправки уведомления админу {admin_id}: {e}")
+                logger.error(f"❌ Ошибка отправки уведомления админу {admin_id}: {e}")
             finally:
                 await bot.session.close()
 
@@ -113,12 +185,12 @@ class BackupService:
                 old_backup_path, old_time = backups.pop(0)
                 os.remove(old_backup_path)
                 deleted_count += 1
-                print(f"🗑️ Удалена старая резервная копия: {os.path.basename(old_backup_path)}")
+                logger.info(f"🗑️ Удалена старая резервная копия: {os.path.basename(old_backup_path)}")
 
             return deleted_count
 
         except Exception as e:
-            print(f"❌ Ошибка очистки старых копий: {e}")
+            logger.error(f"❌ Ошибка очистки старых копий: {e}")
             return 0
 
     async def check_and_backup(self):
@@ -126,7 +198,7 @@ class BackupService:
         size_mb = self.get_db_size()
         stats = self.get_db_stats()
 
-        print(f"📊 Текущий размер базы: {size_mb:.2f} MB")
+        logger.info(f"📊 Текущий размер базы: {size_mb:.2f} MB")
 
         message = None
         backup_created = False
@@ -141,7 +213,8 @@ class BackupService:
                 f"👥 Пользователей: {stats.get('users', 'N/A')}\n"
                 f"📨 Сообщений: {stats.get('messages', 'N/A')}\n"
                 f"💰 Платежей: {stats.get('payments', 'N/A')}\n"
-                f"✅ Резервная копия: {'Создана' if backup_created else 'Ошибка'}"
+                f"✅ Резервная копия: {'Создана' if backup_created else 'Ошибка'}\n"
+                f"📤 Отправлено в Telegram: {'Да' if backup_created else 'Нет'}"
             )
 
         elif size_mb > self.max_size_mb:
@@ -154,6 +227,7 @@ class BackupService:
                 f"👥 Пользователей: {stats.get('users', 'N/A')}\n"
                 f"📨 Сообщений: {stats.get('messages', 'N/A')}\n"
                 f"✅ Резервная копия: {'Создана' if backup_created else 'Ошибка'}\n"
+                f"📤 Отправлено в Telegram: {'Да' if backup_created else 'Нет'}\n"
                 f"💡 Рекомендуется почистить старые данные!"
             )
 
@@ -164,58 +238,9 @@ class BackupService:
         # Всегда чистим старые копии
         deleted_count = self.cleanup_old_backups()
         if deleted_count > 0:
-            print(f"🗑️ Удалено старых копий: {deleted_count}")
+            logger.info(f"🗑️ Удалено старых копий: {deleted_count}")
 
         return size_mb, backup_created
-
-
-    async def send_backup_to_telegram_async(backup_path):
-    """Асинхронная отправка backup в Telegram"""
-    from aiogram import Bot
-    from aiogram.types import InputFile
-    from app.config import BOT_TOKEN, ADMIN_IDS
-    import asyncio
-    
-    try:
-        bot = Bot(token=BOT_TOKEN)
-        backup_name = os.path.basename(backup_path)
-        file_size = os.path.getsize(backup_path)
-        file_size_mb = file_size / (1024 * 1024)
-        
-        for admin_id in ADMIN_IDS:
-            if not admin_id.strip():
-                continue
-                
-            try:
-                admin_id_int = int(admin_id.strip())
-                
-                with open(backup_path, 'rb') as file:
-                    input_file = InputFile(file, filename=backup_name)
-                    
-                    await bot.send_document(
-                        chat_id=admin_id_int,
-                        document=input_file,
-                        caption=(
-                            f"📦 <b>Автоматический backup базы</b>\n\n"
-                            f"📁 Файл: {backup_name}\n"
-                            f"📊 Размер: {file_size_mb:.2f} MB\n"
-                            f"⏰ Дата: {datetime.now().strftime('%d.%m.%Y %H:%M')}\n\n"
-                            f"💾 Сохраните для восстановления"
-                        ),
-                        parse_mode="HTML"
-                    )
-                    
-                print(f"✅ Backup отправлен админу {admin_id_int}")
-                
-            except Exception as e:
-                print(f"❌ Ошибка отправки админу {admin_id}: {e}")
-        
-        await bot.session.close()
-        return True
-        
-    except Exception as e:
-        print(f"❌ Ошибка отправки backup в Telegram: {e}")
-        return False
 
 
 # Глобальный экземпляр
