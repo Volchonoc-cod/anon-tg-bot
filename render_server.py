@@ -368,6 +368,9 @@ async def download_backup_handler(request):
 
 async def send_backup_to_telegram_handler(request):
     """Отправить backup файл в Telegram"""
+    from aiogram import Bot
+    from aiogram.types import InputFile
+    
     backup_name = request.query.get('file', '')
     
     if not backup_name:
@@ -397,88 +400,167 @@ async def send_backup_to_telegram_handler(request):
     for filepath in possible_paths:
         if os.path.exists(filepath):
             found_path = filepath
+            logger.info(f"✅ Файл найден: {filepath}")
             break
     
     if not found_path:
         # Рекурсивный поиск
+        logger.info("🔍 Рекурсивный поиск файла...")
         for root, dirs, files in os.walk('/opt/render'):
             if backup_name in files:
                 found_path = os.path.join(root, backup_name)
+                logger.info(f"✅ Файл найден (рекурсивно): {found_path}")
                 break
         
         if not found_path:
             for root, dirs, files in os.walk('/tmp'):
                 if backup_name in files:
                     found_path = os.path.join(root, backup_name)
+                    logger.info(f"✅ Файл найден (рекурсивно): {found_path}")
                     break
     
     if not found_path or not os.path.exists(found_path):
-        return web.Response(
-            text=f"Файл {backup_name} не найден",
-            content_type='text/plain',
-            status=404
-        )
+        html = f"""
+        <!DOCTYPE html>
+        <html>
+        <head><title>Файл не найден</title></head>
+        <body>
+            <h1>❌ Файл не найден</h1>
+            <p>Файл <code>{backup_name}</code> не найден на сервере.</p>
+            <p><a href="/files">📁 Посмотреть все файлы</a></p>
+        </body>
+        </html>
+        """
+        return web.Response(text=html, content_type='text/html', status=404)
     
     try:
-        # Отправляем в Telegram
-        from aiogram import Bot
-        import asyncio
-        
-        bot = Bot(token=BOT_TOKEN)
+        # Проверяем размер файла
         file_size = os.path.getsize(found_path)
         file_size_mb = file_size / (1024 * 1024)
         
+        if file_size > 50 * 1024 * 1024:  # 50 MB лимит Telegram
+            return web.Response(
+                text=f"Файл слишком большой ({file_size_mb:.2f} MB). Лимит Telegram: 50 MB",
+                content_type='text/plain',
+                status=400
+            )
+        
+        # Создаем Bot экземпляр
+        bot = Bot(token=BOT_TOKEN)
+        
         success_count = 0
         error_count = 0
+        error_messages = []
         
+        # Отправляем каждому админу
         for admin_id in ADMIN_IDS:
             if not admin_id.strip():
                 continue
                 
             try:
                 admin_id_int = int(admin_id.strip())
+                logger.info(f"📨 Отправка файла админу {admin_id_int}")
                 
                 # Сначала отправляем уведомление
-                await bot.send_message(
-                    admin_id_int,
-                    f"📤 <b>Отправка backup файла</b>\n\n"
-                    f"📁 Файл: <code>{backup_name}</code>\n"
-                    f"📦 Размер: {file_size_mb:.2f} MB\n"
-                    f"⏰ Время: {datetime.now().strftime('%H:%M:%S')}\n\n"
-                    "⏳ Загружаю файл...",
-                    parse_mode="HTML"
-                )
+                try:
+                    await bot.send_message(
+                        admin_id_int,
+                        f"📤 <b>Отправка backup файла</b>\n\n"
+                        f"📁 Файл: <code>{backup_name}</code>\n"
+                        f"📦 Размер: {file_size_mb:.2f} MB\n"
+                        f"⏰ Время: {datetime.now().strftime('%H:%M:%S')}\n\n"
+                        f"⏳ Загружаю файл...",
+                        parse_mode="HTML"
+                    )
+                except Exception as e:
+                    logger.warning(f"Не удалось отправить уведомление админу {admin_id_int}: {e}")
                 
-                # Отправляем сам файл
-                with open(found_path, 'rb') as f:
+                # Отправляем сам файл с правильным InputFile
+                with open(found_path, 'rb') as file:
+                    input_file = InputFile(file, filename=backup_name)
+                    
                     await bot.send_document(
                         chat_id=admin_id_int,
-                        document=found_path,
-                        caption=f"📦 Backup БД\n{datetime.now().strftime('%d.%m.%Y %H:%M')}\nРазмер: {file_size_mb:.2f} MB",
+                        document=input_file,
+                        caption=(
+                            f"📦 <b>Backup базы данных</b>\n\n"
+                            f"📁 Файл: {backup_name}\n"
+                            f"📊 Размер: {file_size_mb:.2f} MB\n"
+                            f"⏰ Дата: {datetime.now().strftime('%d.%m.%Y %H:%M')}\n\n"
+                            f"💾 Сохраните этот файл для восстановления данных"
+                        ),
                         parse_mode="HTML"
                     )
                 
                 success_count += 1
-                logger.info(f"✅ Файл отправлен админу {admin_id_int}")
+                logger.info(f"✅ Файл успешно отправлен админу {admin_id_int}")
+                
+                # Небольшая задержка между отправками
+                await asyncio.sleep(1)
                 
             except Exception as e:
                 error_count += 1
+                error_msg = f"Админ {admin_id}: {str(e)[:100]}"
+                error_messages.append(error_msg)
                 logger.error(f"❌ Ошибка отправки админу {admin_id}: {e}")
         
+        # Закрываем сессию бота
         await bot.session.close()
         
-        result_text = (
-            f"📤 <b>Результат отправки</b>\n\n"
-            f"📁 Файл: {backup_name}\n"
-            f"✅ Успешно: {success_count}\n"
-            f"❌ Ошибок: {error_count}\n"
-            f"👥 Всего админов: {len([a for a in ADMIN_IDS if a.strip()])}"
+        # Формируем результат
+        result_html = f"""
+        <!DOCTYPE html>
+        <html>
+        <head>
+            <title>Результат отправки</title>
+            <style>
+                body {{ font-family: Arial, sans-serif; margin: 20px; }}
+                .success {{ color: green; }}
+                .error {{ color: red; }}
+                .info {{ color: blue; }}
+            </style>
+        </head>
+        <body>
+            <h1>📤 Результат отправки файла</h1>
+            
+            <div class="info">
+                <p><strong>📁 Файл:</strong> {backup_name}</p>
+                <p><strong>📦 Размер:</strong> {file_size_mb:.2f} MB</p>
+                <p><strong>⏰ Время отправки:</strong> {datetime.now().strftime('%d.%m.%Y %H:%M:%S')}</p>
+            </div>
+            
+            <div class="success">
+                <h2>✅ Успешно отправлено: {success_count}</h2>
+            </div>
+            
+            <div class="error">
+                <h2>❌ Ошибок: {error_count}</h2>
+                {f'<ul>{"".join([f"<li>{msg}</li>" for msg in error_messages])}</ul>' if error_messages else ''}
+            </div>
+            
+            <div style="margin-top: 30px;">
+                <p><a href="/files">📁 Вернуться к списку файлов</a></p>
+                <p><a href="/">🏠 На главную</a></p>
+            </div>
+        </body>
+        </html>
+        """
+        
+        return web.Response(text=result_html, content_type='text/html')
+        
+    except ImportError as e:
+        logger.error(f"❌ Ошибка импорта aiogram: {e}")
+        return web.Response(
+            text="Ошибка: aiogram не установлен или настроен неправильно",
+            content_type='text/plain',
+            status=500
         )
-        
-        return web.Response(text=result_text, content_type='text/html')
-        
     except Exception as e:
         logger.error(f"❌ Критическая ошибка отправки в Telegram: {e}")
+        import traceback
+        traceback_str = traceback.format_exc()
+        logger.error(f"Трейсбэк: {traceback_str}")
+        
         return web.Response(
             text=f"Ошибка отправки: {str(e)}",
             content_type='text/plain',
