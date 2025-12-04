@@ -21,6 +21,8 @@ from app.keyboards import main_menu
 from app.price_service import price_service
 from app.broadcast_service import broadcast_service
 from app.payment_service import payment_service
+import logging
+logger = logging.getLogger(__name__)
 
 router = Router()
 
@@ -312,13 +314,20 @@ async def admin_users_list(callback: types.CallbackQuery):
                 f"────────────────────\n"
             )
         
+        # Если текст слишком длинный, обрезаем его
+        if len(text) > 4096:
+            text = text[:4000] + "\n... (сообщение обрезано)"
+        
         await callback.message.edit_text(text, parse_mode="HTML", 
                                        reply_markup=admin_pagination_keyboard(page, total_pages, "users"))
         await callback.answer()
         
+    except Exception as e:
+        logger.error(f"Ошибка в admin_users_list: {e}")
+        await callback.answer("❌ Произошла ошибка")
     finally:
         db.close()
-
+        
 @router.callback_query(F.data.startswith("admin_page_users_"))
 async def admin_users_page(callback: types.CallbackQuery):
     """Пагинация списка пользователей"""
