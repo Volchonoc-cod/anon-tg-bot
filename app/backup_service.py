@@ -1,4 +1,3 @@
-
 import os
 import sqlite3
 import shutil
@@ -163,8 +162,8 @@ class BackupService:
                 await bot.send_message(admin_id, message, parse_mode="HTML")
             except Exception as e:
                 logger.error(f"❌ Ошибка отправки уведомления админу {admin_id}: {e}")
-            finally:
-                await bot.session.close()
+        
+        await bot.session.close()
 
     def cleanup_old_backups(self, keep_count=5):
         """Удалить старые резервные копии, оставить только keep_count"""
