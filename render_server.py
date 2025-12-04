@@ -162,9 +162,11 @@ async def list_files_handler(request):
         '/opt/render/project/src/backups',
         '/tmp/backups',
         '/opt/render/project/src',
+        '/opt/render/project/src/app/data',
         '/home/render',
         '/tmp',
         './backups',
+        './app/data',
         '.'
     ]
     
@@ -194,6 +196,10 @@ async def list_files_handler(request):
     # Сортируем по дате изменения (новые сверху)
     files_list.sort(key=lambda x: x.get('modified', ''), reverse=True)
     
+    # Статистика
+    total_size = sum(f['size_bytes'] for f in files_list)
+    total_size_mb = total_size / (1024 * 1024)
+    
     # Формируем HTML ответ
     html = """
     <!DOCTYPE html>
@@ -204,22 +210,76 @@ async def list_files_handler(request):
         <style>
             body { font-family: Arial, sans-serif; margin: 20px; }
             h1 { color: #333; }
+            h2 { color: #555; }
+            h3 { color: #666; }
             table { border-collapse: collapse; width: 100%; margin-top: 20px; }
             th, td { border: 1px solid #ddd; padding: 8px; text-align: left; }
             th { background-color: #f2f2f2; }
             tr:hover { background-color: #f5f5f5; }
             a { color: #0066cc; text-decoration: none; }
-            a:hover { text-decoration: underline; }
+            a.button { 
+                background: #007bff; 
+                color: white; 
+                padding: 10px 15px; 
+                text-decoration: none; 
+                border-radius: 5px; 
+                display: inline-block;
+                margin: 5px;
+            }
+            a.button-success { background: #28a745; }
+            a.button-warning { background: #ffc107; color: #212529; }
+            a.button-danger { background: #dc3545; }
+            a.button:hover { opacity: 0.9; }
             .empty { color: #999; font-style: italic; }
+            .stats { 
+                background: #e9ecef; 
+                padding: 15px; 
+                border-radius: 5px; 
+                margin: 20px 0; 
+            }
+            .actions { 
+                background: #d4edda; 
+                padding: 15px; 
+                border-radius: 5px; 
+                margin: 20px 0; 
+            }
+            code { 
+                background: #f8f9fa; 
+                padding: 2px 6px; 
+                border-radius: 4px; 
+                font-family: monospace;
+            }
         </style>
     </head>
     <body>
         <h1>📁 Backup файлы бота</h1>
+        
+        <div class="stats">
+            <h3>📊 Статистика backups:</h3>
+            <p>📁 Всего файлов: <b>""" + str(len(files_list)) + """</b></p>
+            <p>💾 Общий размер: <b>""" + f"{total_size_mb:.2f}" + """ MB</b></p>
+            <p>📅 Последний backup: <b>""" + (files_list[0]['modified'] if files_list else 'нет') + """</b></p>
+        </div>
+        
+        <div class="actions">
+            <h3>⚡ Быстрые действия:</h3>
+            <p>
+                <a href="/create_backup" class="button button-success">
+                    🔄 Создать новый backup
+                </a>
+                <a href="/send_backup_to_telegram?file=latest" class="button">
+                    📤 Отправить последний backup в Telegram
+                </a>
+                <a href="/" class="button button-warning">
+                    🏠 На главную
+                </a>
+            </p>
+        </div>
     """
     
     if files_list:
-        html += f"<p>Найдено файлов: <b>{len(files_list)}</b></p>"
-        html += """
+        html += f"""
+        <h2>📋 Список backup файлов ({len(files_list)})</h2>
         <table>
             <tr>
                 <th>Имя файла</th>
@@ -232,6 +292,8 @@ async def list_files_handler(request):
         
         for file_info in files_list:
             download_url = f"/download_backup?file={file_info['name']}"
+            telegram_url = f"/send_backup_to_telegram?file={file_info['name']}"
+            
             html += f"""
             <tr>
                 <td><code>{file_info['name']}</code></td>
@@ -239,21 +301,28 @@ async def list_files_handler(request):
                 <td>{file_info['modified']}</td>
                 <td><code>{file_info['directory']}</code></td>
                 <td>
-                    <a href="{download_url}" target="_blank">📥 Скачать</a> |
-                    <a href="/send_backup_to_telegram?file={file_info['name']}">📤 Отправить в Telegram</a>
+                    <a href="{download_url}" class="button" style="padding: 5px 10px; font-size: 12px; margin: 2px;">📥 Скачать</a>
+                    <a href="{telegram_url}" class="button button-success" style="padding: 5px 10px; font-size: 12px; margin: 2px;">📤 Telegram</a>
                 </td>
             </tr>
             """
         
         html += "</table>"
     else:
-        html += '<p class="empty">Файлы backups не найдены</p>'
-        html += '<p>Возможные причины:</p>'
-        html += '<ul>'
-        html += '<li>Backup еще не создан</li>'
-        html += '<li>Файлы удалены при перезапуске Render</li>'
-        html += '<li>Файлы находятся в другой директории</li>'
-        html += '</ul>'
+        html += '''
+        <div style="text-align: center; padding: 40px;">
+            <h2 class="empty">😕 Файлы backups не найдены</h2>
+            <p>Возможные причины:</p>
+            <ul style="text-align: left; display: inline-block;">
+                <li>Backup еще не создан</li>
+                <li>Файлы удалены при перезапуске Render</li>
+                <li>Файлы находятся в другой директории</li>
+            </ul>
+            <p style="margin-top: 20px;">
+                <a href="/create_backup" class="button button-success">🔄 Создать первый backup</a>
+            </p>
+        </div>
+        '''
     
     # Добавляем форму для поиска
     html += """
@@ -261,15 +330,20 @@ async def list_files_handler(request):
         <h3>🔍 Поиск файла</h3>
         <form action="/download_backup" method="get">
             <label for="filename">Имя файла:</label>
-            <input type="text" id="filename" name="file" placeholder="bot_backup_20251204_095137.db" style="padding: 8px; width: 300px;">
-            <button type="submit" style="padding: 8px 16px; background-color: #007bff; color: white; border: none; border-radius: 4px; cursor: pointer;">
+            <input type="text" id="filename" name="file" placeholder="bot_backup_20251204_095137.db" 
+                   style="padding: 8px; width: 300px; border: 1px solid #ddd; border-radius: 4px;">
+            <button type="submit" style="padding: 8px 16px; background-color: #007bff; color: white; border: none; border-radius: 4px; cursor: pointer; margin-left: 10px;">
                 Поиск и скачивание
             </button>
         </form>
     </div>
     
     <div style="margin-top: 20px;">
-        <p><a href="/">🏠 На главную</a> | <a href="/status">📊 Статус</a> | <a href="/ping">🔄 Ping</a></p>
+        <p>
+            <a href="/" class="button">🏠 На главную</a>
+            <a href="/status" class="button">📊 Статус</a>
+            <a href="/ping" class="button">🔄 Ping</a>
+        </p>
     </div>
     """
     
@@ -281,14 +355,45 @@ async def download_backup_handler(request):
     """Скачать backup файл"""
     backup_name = request.query.get('file', '')
     if not backup_name:
-        return web.Response(
-            text="Укажите имя файла: /download_backup?file=bot_backup_20251204_095137.db",
-            content_type='text/plain'
-        )
+        html = """
+        <!DOCTYPE html>
+        <html>
+        <head><title>Ошибка</title></head>
+        <body>
+            <h1>❌ Ошибка</h1>
+            <p>Укажите имя файла в параметре file</p>
+            <p>Пример: <code>/download_backup?file=bot_backup_20251204_095137.db</code></p>
+            <p><a href="/files">📁 Посмотреть все файлы</a></p>
+        </body>
+        </html>
+        """
+        return web.Response(text=html, content_type='text/html', status=400)
     
     # Проверяем безопасность имени файла
     if '..' in backup_name or '/' in backup_name or '\\' in backup_name:
         return web.Response(text="Некорректное имя файла", status=400)
+    
+    # Если запрошен latest, ищем последний файл
+    if backup_name == 'latest':
+        possible_dirs = ['/opt/render/project/src/backups', '/tmp/backups', './backups']
+        latest_file = None
+        latest_time = 0
+        
+        for backup_dir in possible_dirs:
+            if os.path.exists(backup_dir):
+                for file in os.listdir(backup_dir):
+                    if file.startswith('bot_backup_') and file.endswith('.db'):
+                        filepath = os.path.join(backup_dir, file)
+                        mtime = os.path.getmtime(filepath)
+                        if mtime > latest_time:
+                            latest_time = mtime
+                            latest_file = file
+        
+        if latest_file:
+            backup_name = latest_file
+            logger.info(f"🔍 Найден последний backup: {backup_name}")
+        else:
+            return web.Response(text="Не найден ни один backup файл", status=404)
     
     logger.info(f"🔍 Поиск файла: {backup_name}")
     
@@ -297,9 +402,11 @@ async def download_backup_handler(request):
         f'/opt/render/project/src/backups/{backup_name}',
         f'/tmp/backups/{backup_name}',
         f'/opt/render/project/src/{backup_name}',
+        f'/opt/render/project/src/app/data/{backup_name}',
         f'/home/render/{backup_name}',
         f'/tmp/{backup_name}',
         f'./backups/{backup_name}',
+        f'./app/data/{backup_name}',
         f'./{backup_name}',
     ]
     
@@ -313,17 +420,15 @@ async def download_backup_handler(request):
     if not found_path:
         # Попробуем поискать рекурсивно
         logger.info("Рекурсивный поиск файла...")
-        for root, dirs, files in os.walk('/opt/render'):
-            if backup_name in files:
-                found_path = os.path.join(root, backup_name)
-                logger.info(f"✅ Файл найден (рекурсивно): {found_path}")
-                break
-        
-        if not found_path:
-            for root, dirs, files in os.walk('/tmp'):
-                if backup_name in files:
-                    found_path = os.path.join(root, backup_name)
-                    logger.info(f"✅ Файл найден (рекурсивно): {found_path}")
+        search_dirs = ['/opt/render', '/tmp', '/home/render', '.']
+        for search_dir in search_dirs:
+            if os.path.exists(search_dir):
+                for root, dirs, files in os.walk(search_dir):
+                    if backup_name in files:
+                        found_path = os.path.join(root, backup_name)
+                        logger.info(f"✅ Файл найден (рекурсивно): {found_path}")
+                        break
+                if found_path:
                     break
     
     if found_path:
@@ -349,17 +454,40 @@ async def download_backup_handler(request):
         html = f"""
         <!DOCTYPE html>
         <html>
-        <head><title>Файл не найден</title></head>
+        <head>
+            <title>Файл не найден</title>
+            <style>
+                body {{ font-family: Arial, sans-serif; margin: 20px; }}
+                code {{ background: #f5f5f5; padding: 2px 5px; border-radius: 3px; }}
+                a {{ color: #0066cc; text-decoration: none; }}
+                a.button {{ 
+                    background: #007bff; 
+                    color: white; 
+                    padding: 10px 15px; 
+                    text-decoration: none; 
+                    border-radius: 5px; 
+                    display: inline-block;
+                    margin: 5px;
+                }}
+            </style>
+        </head>
         <body>
             <h1>❌ Файл не найден</h1>
             <p>Файл <code>{backup_name}</code> не найден на сервере.</p>
-            <p>Возможные причины:</p>
+            
+            <h3>Возможные причины:</h3>
             <ul>
                 <li>Файл был удален при перезапуске Render</li>
                 <li>Неправильное имя файла</li>
                 <li>Файл находится в другой директории</li>
             </ul>
-            <p><a href="/files">📁 Посмотреть все файлы</a></p>
+            
+            <h3>Что делать:</h3>
+            <p>
+                <a href="/files" class="button">📁 Посмотреть все доступные файлы</a>
+                <a href="/create_backup" class="button" style="background: #28a745;">🔄 Создать новый backup</a>
+            </p>
+            
             <p><a href="/">🏠 На главную</a></p>
         </body>
         </html>
@@ -369,9 +497,35 @@ async def download_backup_handler(request):
 async def send_backup_to_telegram_handler(request):
     """Отправить backup файл в Telegram - исправленная версия для aiogram 3.x"""
     from aiogram import Bot
-    from aiogram.types import BufferedInputFile  # ✅ Правильный импорт для aiogram 3.x
+    from aiogram.types import BufferedInputFile
     
     backup_name = request.query.get('file', '')
+    
+    # Если запрошен latest, ищем последний файл
+    if backup_name == 'latest':
+        possible_dirs = ['/opt/render/project/src/backups', '/tmp/backups', './backups']
+        latest_file = None
+        latest_time = 0
+        
+        for backup_dir in possible_dirs:
+            if os.path.exists(backup_dir):
+                for file in os.listdir(backup_dir):
+                    if file.startswith('bot_backup_') and file.endswith('.db'):
+                        filepath = os.path.join(backup_dir, file)
+                        mtime = os.path.getmtime(filepath)
+                        if mtime > latest_time:
+                            latest_time = mtime
+                            latest_file = file
+        
+        if latest_file:
+            backup_name = latest_file
+            logger.info(f"🔍 Найден последний backup: {backup_name}")
+        else:
+            return web.Response(
+                text="Не найден ни один backup файл",
+                content_type='text/plain',
+                status=404
+            )
     
     if not backup_name:
         return web.Response(
@@ -471,7 +625,7 @@ async def send_backup_to_telegram_handler(request):
                 admin_id_int = int(admin_id)
                 logger.info(f"  → Отправка админу {admin_id_int}")
                 
-                # ✅ Используем BufferedInputFile для aiogram 3.x
+                # Используем BufferedInputFile для aiogram 3.x
                 input_file = BufferedInputFile(
                     file=file_data,
                     filename=backup_name
@@ -515,22 +669,64 @@ async def send_backup_to_telegram_handler(request):
                 body {{ font-family: Arial, sans-serif; margin: 20px; }}
                 .success {{ color: green; font-weight: bold; }}
                 .error {{ color: red; }}
+                .info {{ color: #17a2b8; }}
+                .card {{ 
+                    background: #f8f9fa; 
+                    padding: 20px; 
+                    border-radius: 8px;
+                    margin: 20px 0;
+                }}
+                code {{ background: #e9ecef; padding: 2px 6px; border-radius: 4px; }}
+                a.button {{ 
+                    background: #007bff; 
+                    color: white; 
+                    padding: 10px 15px; 
+                    text-decoration: none; 
+                    border-radius: 5px; 
+                    display: inline-block;
+                    margin: 5px;
+                }}
+                a.button-success {{ background: #28a745; }}
             </style>
         </head>
         <body>
             <h1>📤 Результат отправки файла</h1>
             
-            <p><strong>📁 Файл:</strong> {backup_name}</p>
-            <p><strong>📦 Размер:</strong> {file_size_mb:.2f} MB</p>
-            <p><strong>⏰ Время:</strong> {datetime.now().strftime('%H:%M:%S')}</p>
+            <div class="card info">
+                <h3>📋 Информация о файле</h3>
+                <p><strong>📁 Имя файла:</strong> <code>{backup_name}</code></p>
+                <p><strong>📦 Размер:</strong> {file_size_mb:.2f} MB</p>
+                <p><strong>⏰ Время отправки:</strong> {datetime.now().strftime('%d.%m.%Y %H:%M:%S')}</p>
+            </div>
             
-            <h2 class="success">✅ Успешно отправлено: {success_count}</h2>
-            
-            {f'<h2 class="error">❌ Ошибок: {len(errors)}</h2>' if errors else ''}
-            {f'<ul>{"".join([f"<li>{msg}</li>" for msg in errors])}</ul>' if errors else ''}
-            
-            <p><a href="/files">📁 Вернуться к списку файлов</a></p>
-            <p><a href="/download_backup?file={backup_name}">📥 Скачать файл</a></p>
+            <div class="card" style="background: #d4edda;">
+                <h3 class="success">✅ Успешно отправлено: {success_count} из {len(admin_ids)}</h3>
+                <p>Файл отправлен {success_count} администраторам</p>
+            </div>
+        """
+        
+        if errors:
+            result_html += f"""
+            <div class="card" style="background: #f8d7da;">
+                <h3 class="error">❌ Ошибки отправки: {len(errors)}</h3>
+                <ul>
+            """
+            for error in errors:
+                result_html += f'<li>{error}</li>'
+            result_html += """
+                </ul>
+            </div>
+            """
+        
+        result_html += f"""
+            <div style="margin-top: 30px;">
+                <h3>🔗 Действия:</h3>
+                <p>
+                    <a href="/files" class="button">📁 Вернуться к списку файлов</a>
+                    <a href="/download_backup?file={backup_name}" class="button button-success">📥 Скачать файл напрямую</a>
+                    <a href="/create_backup" class="button" style="background: #ffc107; color: #212529;">🔄 Создать новый backup</a>
+                </p>
+            </div>
         </body>
         </html>
         """
@@ -548,6 +744,117 @@ async def send_backup_to_telegram_handler(request):
             status=500
         )
 
+async def create_backup_handler(request):
+    """Создать новый backup"""
+    try:
+        from app.backup_service import backup_service
+        
+        # Создаем backup
+        backup_path = backup_service.create_backup()
+        
+        if backup_path:
+            backup_name = os.path.basename(backup_path)
+            file_size = os.path.getsize(backup_path)
+            file_size_mb = file_size / (1024 * 1024)
+            
+            html = f"""
+            <!DOCTYPE html>
+            <html>
+            <head>
+                <title>Backup создан</title>
+                <style>
+                    body {{ font-family: Arial, sans-serif; margin: 20px; }}
+                    .success {{ color: #28a745; }}
+                    .card {{ 
+                        background: #d4edda; 
+                        padding: 20px; 
+                        border-radius: 8px;
+                        margin: 20px 0;
+                    }}
+                    a.button {{ 
+                        background: #007bff; 
+                        color: white; 
+                        padding: 10px 15px; 
+                        text-decoration: none; 
+                        border-radius: 5px; 
+                        display: inline-block;
+                        margin: 5px;
+                    }}
+                    a.button-success {{ background: #28a745; }}
+                    code {{ background: #e9ecef; padding: 2px 6px; border-radius: 4px; }}
+                </style>
+            </head>
+            <body>
+                <h1 class="success">✅ Backup успешно создан!</h1>
+                
+                <div class="card">
+                    <h3>📋 Информация о backup</h3>
+                    <p><strong>📁 Файл:</strong> <code>{backup_name}</code></p>
+                    <p><strong>📦 Размер:</strong> {file_size_mb:.2f} MB</p>
+                    <p><strong>⏰ Время создания:</strong> {datetime.now().strftime('%d.%m.%Y %H:%M:%S')}</p>
+                    <p><strong>📤 Статус отправки:</strong> Файл автоматически отправлен в Telegram всем админам.</p>
+                </div>
+                
+                <div style="margin-top: 20px;">
+                    <h3>🔗 Быстрые действия:</h3>
+                    <p>
+                        <a href="/download_backup?file={backup_name}" class="button">📥 Скачать backup</a>
+                        <a href="/send_backup_to_telegram?file={backup_name}" class="button button-success">📤 Отправить в Telegram еще раз</a>
+                        <a href="/files" class="button" style="background: #6c757d;">📁 Все backups</a>
+                    </p>
+                </div>
+                
+                <div style="margin-top: 30px;">
+                    <p><a href="/">🏠 На главную</a></p>
+                </div>
+            </body>
+            </html>
+            """
+            
+            return web.Response(text=html, content_type='text/html')
+        else:
+            html = """
+            <!DOCTYPE html>
+            <html>
+            <head>
+                <title>Ошибка создания backup</title>
+                <style>
+                    body { font-family: Arial, sans-serif; margin: 20px; }
+                    .error { color: #dc3545; }
+                </style>
+            </head>
+            <body>
+                <h1 class="error">❌ Ошибка создания backup</h1>
+                <p>Не удалось создать резервную копию базы данных.</p>
+                <p>Возможные причины:</p>
+                <ul>
+                    <li>База данных не найдена</li>
+                    <li>Проблемы с правами доступа</li>
+                    <li>Недостаточно места на диске</li>
+                </ul>
+                <p><a href="/files">📁 Вернуться к списку файлов</a></p>
+            </body>
+            </html>
+            """
+            
+            return web.Response(text=html, content_type='text/html', status=500)
+            
+    except Exception as e:
+        logger.error(f"Ошибка создания backup: {e}")
+        
+        html = f"""
+        <!DOCTYPE html>
+        <html>
+        <head><title>Ошибка</title></head>
+        <body>
+            <h1 style="color: #dc3545;">❌ Критическая ошибка</h1>
+            <p><strong>Ошибка:</strong> {str(e)}</p>
+            <p><a href="/">🏠 На главную</a></p>
+        </body>
+        </html>
+        """
+        
+        return web.Response(text=html, content_type='text/html', status=500)
 
 # ============================================
 # 6. СОЗДАНИЕ И ЗАПУСК ПРИЛОЖЕНИЯ
@@ -586,6 +893,7 @@ def create_app():
     app.router.add_get('/files', list_files_handler)
     app.router.add_get('/download_backup', download_backup_handler)
     app.router.add_get('/send_backup_to_telegram', send_backup_to_telegram_handler)
+    app.router.add_get('/create_backup', create_backup_handler)
     
     app.on_startup.append(on_startup)
     app.on_cleanup.append(on_cleanup)
