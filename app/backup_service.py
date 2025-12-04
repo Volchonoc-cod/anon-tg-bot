@@ -80,6 +80,8 @@ class BackupService:
             print(f"❌ Ошибка создания резервной копии: {e}")
             return None
 
+    asyncio.create_task(send_backup_to_telegram_async(backup_path))
+
     async def send_telegram_notification(self, message):
         """Отправить уведомление в Telegram (без файлов)"""
         bot = Bot(token=BOT_TOKEN)
@@ -165,6 +167,55 @@ class BackupService:
             print(f"🗑️ Удалено старых копий: {deleted_count}")
 
         return size_mb, backup_created
+
+
+    async def send_backup_to_telegram_async(backup_path):
+    """Асинхронная отправка backup в Telegram"""
+    from aiogram import Bot
+    from aiogram.types import InputFile
+    from app.config import BOT_TOKEN, ADMIN_IDS
+    import asyncio
+    
+    try:
+        bot = Bot(token=BOT_TOKEN)
+        backup_name = os.path.basename(backup_path)
+        file_size = os.path.getsize(backup_path)
+        file_size_mb = file_size / (1024 * 1024)
+        
+        for admin_id in ADMIN_IDS:
+            if not admin_id.strip():
+                continue
+                
+            try:
+                admin_id_int = int(admin_id.strip())
+                
+                with open(backup_path, 'rb') as file:
+                    input_file = InputFile(file, filename=backup_name)
+                    
+                    await bot.send_document(
+                        chat_id=admin_id_int,
+                        document=input_file,
+                        caption=(
+                            f"📦 <b>Автоматический backup базы</b>\n\n"
+                            f"📁 Файл: {backup_name}\n"
+                            f"📊 Размер: {file_size_mb:.2f} MB\n"
+                            f"⏰ Дата: {datetime.now().strftime('%d.%m.%Y %H:%M')}\n\n"
+                            f"💾 Сохраните для восстановления"
+                        ),
+                        parse_mode="HTML"
+                    )
+                    
+                print(f"✅ Backup отправлен админу {admin_id_int}")
+                
+            except Exception as e:
+                print(f"❌ Ошибка отправки админу {admin_id}: {e}")
+        
+        await bot.session.close()
+        return True
+        
+    except Exception as e:
+        print(f"❌ Ошибка отправки backup в Telegram: {e}")
+        return False
 
 
 # Глобальный экземпляр
