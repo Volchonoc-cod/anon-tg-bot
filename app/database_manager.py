@@ -344,11 +344,6 @@ class DatabaseManager:
         thread.start()
         logger.info(f"⏰ Периодические бэкапы запланированы каждые {interval_hours} часов")
     
-   
-        
-    except Exception as e:
-        logger.error(f"❌ Ошибка экспорта в SQL: {e}")
-        return False
     
     def import_from_sql(self, sql_file: str) -> bool:
         """Импорт базы данных из SQL файла"""
