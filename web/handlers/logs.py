@@ -51,6 +51,9 @@ async def logs_handler(request):
         </tr>
         '''
     
+    # HTML для случая, когда нет файлов логов
+    no_logs_html = '''<tr><td colspan="4" style="padding: 15px; text-align: center; color: var(--gray);">Файлы логов не найдены</td></tr>'''
+    
     content = f'''
     <div class="glass-card">
         <h2 style="margin-bottom: 25px;">
@@ -93,13 +96,7 @@ async def logs_handler(request):
                             </tr>
                         </thead>
                         <tbody>
-                            {log_files_html if log_files_html else '''
-                            <tr>
-                                <td colspan="4" style="padding: 15px; text-align: center; color: var(--gray);">
-                                    Файлы логов не найдены
-                                </td>
-                            </tr>
-                            '''}
+                            {log_files_html if log_files_html else no_logs_html}
                         </tbody>
                     </table>
                 </div>
@@ -186,7 +183,7 @@ async def logs_handler(request):
         const level = document.getElementById('logLevel').value;
         const search = document.getElementById('logSearch').value;
         const date = document.getElementById('logDate').value;
-        alert(`Применены фильтры:\\nУровень: ${level}\\nПоиск: ${search}\\nПериод: ${date}`);
+        alert(`Применены фильтры:\\nУровень: ${{level}}\\nПоиск: ${{search}}\\nПериод: ${{date}}`);
     }}
     </script>
     '''
