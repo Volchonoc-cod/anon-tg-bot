@@ -108,12 +108,34 @@ class BackupService:
             success_count = 0
             error_count = 0
             
-            for admin_id in ADMIN_IDS:
-                if not admin_id.strip():
-                    continue
-                    
+            # Обрабатываем ADMIN_IDS в зависимости от их типа
+            admin_ids_list = []
+            
+            if isinstance(ADMIN_IDS, list):
+                # Если это список
+                admin_ids_list = ADMIN_IDS
+            elif isinstance(ADMIN_IDS, str):
+                # Если это строка с разделителями
+                for admin_id_str in ADMIN_IDS.split(','):
+                    admin_id_clean = admin_id_str.strip()
+                    if admin_id_clean:
+                        try:
+                            admin_ids_list.append(int(admin_id_clean))
+                        except ValueError:
+                            logger.warning(f"⚠️ Некорректный ID админа: {admin_id_str}")
+            else:
+                # Если это одиночное значение
                 try:
-                    admin_id_int = int(admin_id.strip())
+                    admin_ids_list = [int(ADMIN_IDS)]
+                except (ValueError, TypeError):
+                    logger.error(f"❌ Некорректный формат ADMIN_IDS: {ADMIN_IDS}")
+                    return False
+            
+            for admin_id_int in admin_ids_list:
+                try:
+                    # Проверяем, что это число
+                    if not isinstance(admin_id_int, int):
+                        admin_id_int = int(admin_id_int)
                     
                     # Используем BufferedInputFile для aiogram 3.x
                     input_file = BufferedInputFile(
@@ -142,7 +164,7 @@ class BackupService:
                     
                 except Exception as e:
                     error_count += 1
-                    logger.error(f"❌ Ошибка отправки админу {admin_id}: {e}")
+                    logger.error(f"❌ Ошибка отправки админу {admin_id_int}: {e}")
             
             await bot.session.close()
             
@@ -155,15 +177,54 @@ class BackupService:
 
     async def send_telegram_notification(self, message):
         """Отправить уведомление в Telegram (без файлов)"""
-        bot = Bot(token=BOT_TOKEN)
-
-        for admin_id in ADMIN_IDS:
-            try:
-                await bot.send_message(admin_id, message, parse_mode="HTML")
-            except Exception as e:
-                logger.error(f"❌ Ошибка отправки уведомления админу {admin_id}: {e}")
-        
-        await bot.session.close()
+        try:
+            if not BOT_TOKEN or not ADMIN_IDS:
+                logger.warning("⚠️ BOT_TOKEN или ADMIN_IDS не установлены, пропускаю отправку уведомления")
+                return False
+                
+            bot = Bot(token=BOT_TOKEN)
+            
+            # Обрабатываем ADMIN_IDS в зависимости от их типа
+            admin_ids_list = []
+            
+            if isinstance(ADMIN_IDS, list):
+                # Если это список
+                admin_ids_list = ADMIN_IDS
+            elif isinstance(ADMIN_IDS, str):
+                # Если это строка с разделителями
+                for admin_id_str in ADMIN_IDS.split(','):
+                    admin_id_clean = admin_id_str.strip()
+                    if admin_id_clean:
+                        try:
+                            admin_ids_list.append(int(admin_id_clean))
+                        except ValueError:
+                            logger.warning(f"⚠️ Некорректный ID админа: {admin_id_str}")
+            else:
+                # Если это одиночное значение
+                try:
+                    admin_ids_list = [int(ADMIN_IDS)]
+                except (ValueError, TypeError):
+                    logger.error(f"❌ Некорректный формат ADMIN_IDS: {ADMIN_IDS}")
+                    return False
+            
+            for admin_id_int in admin_ids_list:
+                try:
+                    # Проверяем, что это число
+                    if not isinstance(admin_id_int, int):
+                        admin_id_int = int(admin_id_int)
+                        
+                    await bot.send_message(admin_id_int, message, parse_mode="HTML")
+                    logger.debug(f"✅ Уведомление отправлено админу {admin_id_int}")
+                    
+                except Exception as e:
+                    logger.error(f"❌ Ошибка отправки уведомления админу {admin_id_int}: {e}")
+            
+            await bot.session.close()
+            return True
+            
+        except Exception as e:
+            logger.error(f"❌ Общая ошибка отправки уведомления: {e}")
+            return False
 
     def cleanup_old_backups(self, keep_count=5):
         """Удалить старые резервные копии, оставить только keep_count"""
