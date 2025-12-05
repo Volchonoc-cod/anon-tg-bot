@@ -28,8 +28,7 @@ async def start_bot_background():
     try:
         logger.info("🤖 Фоновый запуск Telegram бота...")
         
-        # Используем оптимизированную версию из run_bot.py
-        from run_bot import run_bot_optimized
+        from run_bot import run_bot_async as run_bot_optimized
         await run_bot_optimized()
         
     except Exception as e:
