@@ -11,6 +11,9 @@ async def users_handler(request):
     try:
         stats = get_stats()
         
+        # HTML для случая, когда нет подключения к БД
+        no_db_html = '''<tr><td colspan="5" style="padding: 30px; text-align: center; color: var(--gray);"><i class="fas fa-database" style="font-size: 2em; margin-bottom: 10px; display: block;"></i>Для просмотра пользователей необходимо подключение к базе данных</td></tr>'''
+        
         content = f'''
         <div class="glass-card">
             <h2 style="margin-bottom: 25px;">
@@ -71,12 +74,7 @@ async def users_handler(request):
                             </tr>
                         </thead>
                         <tbody id="usersTable">
-                            <tr>
-                                <td colspan="5" style="padding: 30px; text-align: center; color: var(--gray);">
-                                    <i class="fas fa-database" style="font-size: 2em; margin-bottom: 10px; display: block;"></i>
-                                    Для просмотра пользователей необходимо подключение к базе данных
-                                </td>
-                            </tr>
+                            {no_db_html}
                         </tbody>
                     </table>
                 </div>
