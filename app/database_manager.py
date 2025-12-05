@@ -344,57 +344,7 @@ class DatabaseManager:
         thread.start()
         logger.info(f"⏰ Периодические бэкапы запланированы каждые {interval_hours} часов")
     
-    def export_to_sql(self, sql_file: str = 'data/database_export.sql') -> bool:
-    """Экспорт базы данных в SQL файл"""
-    try:
-        conn = sqlite3.connect(self.db_path)
-        
-        with open(sql_file, 'w', encoding='utf-8') as f:
-            # Пишем информацию о бэкапе
-            f.write(f"-- SQL Export from {self.db_path}\n")
-            f.write(f"-- Export time: {datetime.now().isoformat()}\n")
-            f.write("BEGIN TRANSACTION;\n\n")
-            
-            # Экспортируем схему
-            cursor = conn.cursor()
-            cursor.execute("SELECT sql FROM sqlite_master WHERE type='table' AND name NOT LIKE 'sqlite_%'")
-            
-            for row in cursor.fetchall():
-                if row[0]:
-                    f.write(row[0] + ";\n\n")
-            
-            # Экспортируем данные
-            cursor.execute("SELECT name FROM sqlite_master WHERE type='table' AND name NOT LIKE 'sqlite_%'")
-            tables = [row[0] for row in cursor.fetchall()]
-            
-            for table in tables:
-                cursor.execute(f"SELECT * FROM {table}")
-                columns = [description[0] for description in cursor.description]
-                
-                f.write(f"-- Data for table: {table}\n")
-                
-                for row in cursor.fetchall():
-                    values = []
-                    for value in row:
-                        if value is None:
-                            values.append("NULL")
-                        elif isinstance(value, (int, float)):
-                            values.append(str(value))
-                        else:
-                            # Экранируем одинарные кавычки
-                            escaped_value = str(value).replace("'", "''")
-                            values.append(f"'{escaped_value}'")
-                    
-                    insert_sql = f"INSERT INTO {table} ({', '.join(columns)}) VALUES ({', '.join(values)});\n"
-                    f.write(insert_sql)
-                
-                f.write("\n")
-            
-            f.write("COMMIT;\n")
-        
-        conn.close()
-        logger.info(f"✅ БД экспортирована в SQL: {sql_file}")
-        return True
+   
         
     except Exception as e:
         logger.error(f"❌ Ошибка экспорта в SQL: {e}")
