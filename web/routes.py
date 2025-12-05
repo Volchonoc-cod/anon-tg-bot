@@ -22,7 +22,10 @@ def setup_routes(app: web.Application):
         api_stats_handler,
         api_system_stats_handler,
         api_create_backup,
-        api_send_backup
+        api_send_backup,
+        api_restore_backup,      # НОВОЕ
+        api_cleanup_backups,     # НОВОЕ
+        api_dbinfo               # НОВОЕ
     )
     
     logger.info("📋 Регистрация маршрутов веб-панели...")
@@ -42,9 +45,35 @@ def setup_routes(app: web.Application):
     app.router.add_get('/api/create_backup', api_create_backup)
     app.router.add_get('/api/send_backup', api_send_backup)
     
+    # Новые API endpoints для менеджера БД
+    app.router.add_get('/api/restore_backup', api_restore_backup)
+    app.router.add_get('/api/cleanup_backups', api_cleanup_backups)
+    app.router.add_get('/api/dbinfo', api_dbinfo)
+    
     # Legacy endpoints для совместимости
     app.router.add_get('/download_backup', backups_handler)
     app.router.add_get('/send_backup_to_telegram', backups_handler)
     app.router.add_get('/create_backup', backups_handler)
     
     logger.info("✅ Все маршруты зарегистрированы")
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
