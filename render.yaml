@@ -3,12 +3,23 @@ services:
     name: anon-tg-bot
     env: python
     plan: free
-    buildCommand: chmod +x build.sh && ./build.sh
-    startCommand: gunicorn render_server:app --bind 0.0.0.0:$PORT --worker-class aiohttp.GunicornWebWorker
+    # Если используете приватный репозиторий
+    repo: https://github.com/Volchonoc-cod/anon-tg-bot.git
+    # или с SSH
+    # repo: git@github.com:Volchonoc-cod/anon-tg-bot.git
+    
+    # Дополнительные настройки для приватных репозиториев
+    buildCommand: |
+      # Для GitHub с токеном
+      if [ -n "$GITHUB_TOKEN" ]; then
+        git config --global url."https://$GITHUB_TOKEN@github.com/".insteadOf "https://github.com/"
+      fi
+      
+      # Устанавливаем зависимости
+      pip install --upgrade pip
+      pip install -r requirements.txt
+    
+    startCommand: python run_bot.py
     envVars:
-      - key: PYTHON_VERSION
-        value: 3.11.0
-      - key: RENDER
-        value: true
-    healthCheckPath: /health
-    autoDeploy: true
+      - key: GITHUB_TOKEN
+        sync: false  # Не синхронизировать, вводится вручную
