@@ -47,6 +47,9 @@ async def monitor_handler(request):
         </tr>
         '''
     
+    # HTML для случая, когда нет процессов
+    no_processes_html = '''<tr><td colspan="4" style="padding: 20px; text-align: center; color: var(--gray);">Нет данных о процессах</td></tr>'''
+    
     content = f'''
     <div class="glass-card">
         <h2 style="margin-bottom: 25px;">
@@ -67,7 +70,7 @@ async def monitor_handler(request):
                 </div>
                 <div style="color: var(--gray);">Использование памяти</div>
                 <div style="font-size: 0.9em; margin-top: 5px;">
-                    {system_info['memory_used']} / {system_info['memory_total']}
+                    {system_info.get('memory_used', 'N/A')} / {system_info.get('memory_total', 'N/A')}
                 </div>
             </div>
             
@@ -133,13 +136,7 @@ async def monitor_handler(request):
                         </tr>
                     </thead>
                     <tbody>
-                        {processes_html if processes_html else '''
-                        <tr>
-                            <td colspan="4" style="padding: 20px; text-align: center; color: var(--gray);">
-                                Нет данных о процессах
-                            </td>
-                        </tr>
-                        '''}
+                        {processes_html if processes_html else no_processes_html}
                     </tbody>
                 </table>
             </div>
@@ -150,11 +147,11 @@ async def monitor_handler(request):
             <div style="display: grid; grid-template-columns: repeat(auto-fit, minmax(250px, 1fr)); gap: 15px; margin-top: 15px;">
                 <div>
                     <div style="font-weight: 600; color: var(--gray);">Платформа</div>
-                    <div>{system_info['platform']}</div>
+                    <div>{system_info.get('platform', 'N/A')}</div>
                 </div>
                 <div>
                     <div style="font-weight: 600; color: var(--gray);">Python версия</div>
-                    <div>{system_info['python_version']}</div>
+                    <div>{system_info.get('python_version', 'N/A')}</div>
                 </div>
                 <div>
                     <div style="font-weight: 600; color: var(--gray);">CPU ядер</div>
