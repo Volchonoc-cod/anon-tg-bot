@@ -40,9 +40,9 @@ async def logs_handler(request):
     for log in sorted(log_files, key=lambda x: x['modified'], reverse=True):
         log_files_html += f'''
         <tr>
-            <td>{log['name']}</td>
-            <td>{log['size']}</td>
-            <td>{log['modified']}</td>
+            <td>{log["name"]}</td>
+            <td>{log["size"]}</td>
+            <td>{log["modified"]}</td>
             <td>
                 <button class="btn" style="padding: 6px 12px;" onclick="viewLog('{log['name']}')">
                     <i class="fas fa-eye"></i>
