@@ -39,6 +39,9 @@ async def backups_handler(request):
         </tr>
         '''
     
+    # HTML для случая, когда нет бекапов
+    no_backups_html = '''<tr><td colspan="4" style="padding: 20px; text-align: center; color: var(--gray);">Бекапы не найдены</td></tr>'''
+    
     content = f'''
     <div class="glass-card">
         <div style="display: flex; justify-content: space-between; align-items: center; margin-bottom: 30px;">
@@ -59,13 +62,7 @@ async def backups_handler(request):
                     </tr>
                 </thead>
                 <tbody>
-                    {backups_html if backups_html else '''
-                    <tr>
-                        <td colspan="4" style="padding: 20px; text-align: center; color: var(--gray);">
-                            Бекапы не найдены
-                        </td>
-                    </tr>
-                    '''}
+                    {backups_html if backups_html else no_backups_html}
                 </tbody>
             </table>
         </div>
