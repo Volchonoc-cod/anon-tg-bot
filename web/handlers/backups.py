@@ -28,9 +28,9 @@ async def backups_handler(request):
     for backup in sorted(backups, key=lambda x: x['date'], reverse=True)[:10]:
         backups_html += f'''
         <tr>
-            <td>{backup['name']}</td>
-            <td>{backup['size']}</td>
-            <td>{backup['date']}</td>
+            <td>{backup["name"]}</td>
+            <td>{backup["size"]}</td>
+            <td>{backup["date"]}</td>
             <td>
                 <a href="/api/send_backup?file={backup['name']}" class="btn" style="padding: 8px 15px;">
                     <i class="fas fa-paper-plane"></i>
