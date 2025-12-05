@@ -1,6 +1,4 @@
 #!/bin/bash
-# start.sh - скрипт запуска для модульной архитектуры
-
 echo "🚀 Запуск ShadowTalk с модульной архитектурой..."
 
 # Создаем структуру папок
@@ -8,25 +6,7 @@ mkdir -p data backups logs web/static/css web/static/js
 
 # Запускаем бота в фоне
 echo "🤖 Запуск Telegram бота в фоне..."
-python3 -c "
-import subprocess
-import sys
-import os
-import time
-
-# Запускаем бота
-bot_proc = subprocess.Popen(
-    [sys.executable, 'run_bot.py'],
-    stdout=subprocess.PIPE,
-    stderr=subprocess.PIPE,
-    text=True
-)
-
-print(f'[MAIN] ✅ Бот запущен, PID: {bot_proc.pid}')
-
-# Даем боту время на запуск
-time.sleep(3)
-" &
+python3 -u run_bot.py &
 
 # Ждем немного
 sleep 2
