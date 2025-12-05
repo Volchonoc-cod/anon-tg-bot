@@ -7,7 +7,9 @@ from sqlalchemy.orm import Session
 from sqlalchemy import func, desc
 from datetime import datetime, timedelta
 import asyncio
-
+from aiogram.types import Message, CallbackQuery, FSInputFile
+import json
+from app.database_manager import db_manager  # Импортируем менеджер БД
 from app.database import get_db
 from app.models import User, AnonMessage, Payment
 from app.config import ADMIN_IDS
@@ -38,6 +40,265 @@ class AdminStates(StatesGroup):
 
 def is_admin(user_id: int):
     return user_id in ADMIN_IDS
+
+# Фильтр для админов
+def admin_filter(message: Message) -> bool:
+    return message.from_user.id in ADMIN_IDS
+
+# Состояния для FSM
+class BackupStates(StatesGroup):
+    waiting_backup_name = State()
+    waiting_restore_confirmation = State()
+
+@router.message(Command("backup"), admin_filter)
+async def cmd_backup(message: Message):
+    """Создать бэкап БД"""
+    try:
+        # Создаем бэкап
+        backup_path = db_manager.create_backup()
+        
+        if backup_path:
+            backup_name = os.path.basename(backup_path)
+            backup_size = os.path.getsize(backup_path) / (1024 * 1024)  # MB
+            
+            # Получаем информацию о бэкапах
+            backups = db_manager.list_backups()
+            
+            response = (
+                f"✅ <b>Бэкап создан успешно!</b>\n\n"
+                f"📁 Имя: {backup_name}\n"
+                f"📊 Размер: {backup_size:.2f} MB\n"
+                f"📂 Всего бэкапов: {len(backups)}\n"
+                f"⏰ Время: {datetime.now().strftime('%H:%M:%S')}"
+            )
+            
+            # Отправляем файл пользователю
+            await message.answer_document(
+                FSInputFile(backup_path),
+                caption=response,
+                parse_mode="HTML"
+            )
+        else:
+            await message.answer("❌ Не удалось создать бэкап")
+            
+    except Exception as e:
+        await message.answer(f"❌ Ошибка при создании бэкапа: {str(e)}")
+
+@router.message(Command("backups"), admin_filter)
+async def cmd_backups(message: Message):
+    """Показать список бэкапов"""
+    try:
+        backups = db_manager.list_backups()
+        
+        if not backups:
+            await message.answer("📭 Бэкапы не найдены")
+            return
+        
+        # Формируем сообщение
+        response = "📂 <b>Список бэкапов:</b>\n\n"
+        
+        for i, backup in enumerate(reversed(backups[-10:]), 1):  # Последние 10
+            created = backup["created"].strftime("%d.%m.%Y %H:%M")
+            size_mb = backup["size_mb"]
+            valid = "✅" if backup["is_valid"] else "❌"
+            
+            response += (
+                f"{i}. <code>{backup['name']}</code>\n"
+                f"   📅 {created} | 📊 {size_mb:.2f} MB | {valid}\n\n"
+            )
+        
+        # Добавляем статистику
+        db_info = db_manager.get_db_info()
+        response += (
+            f"📊 <b>Статистика БД:</b>\n"
+            f"Размер: {db_info.get('size_mb', 0):.2f} MB\n"
+            f"Таблиц: {len(db_info.get('tables', []))}\n"
+            f"Всего бэкапов: {len(backups)}"
+        )
+        
+        await message.answer(response, parse_mode="HTML")
+        
+    except Exception as e:
+        await message.answer(f"❌ Ошибка при получении списка бэкапов: {str(e)}")
+
+@router.message(Command("restore"), admin_filter)
+async def cmd_restore(message: Message, state: FSMContext):
+    """Восстановить БД из бэкапа"""
+    try:
+        backups = db_manager.list_backups()
+        
+        if not backups:
+            await message.answer("📭 Бэкапы не найдены для восстановления")
+            return
+        
+        # Показываем последние 5 бэкапов
+        response = "🔄 <b>Выберите бэкап для восстановления:</b>\n\n"
+        
+        for i, backup in enumerate(reversed(backups[-5:]), 1):
+            created = backup["created"].strftime("%d.%m.%Y %H:%M")
+            size_mb = backup["size_mb"]
+            valid = "✅" if backup["is_valid"] else "❌"
+            
+            response += (
+                f"{i}. <code>{backup['name']}</code>\n"
+                f"   📅 {created} | 📊 {size_mb:.2f} MB | {valid}\n"
+                f"   Команда: /restore_{i}\n\n"
+            )
+        
+        response += "⚠️ <b>Внимание:</b> Текущая БД будет заменена!"
+        
+        await message.answer(response, parse_mode="HTML")
+        
+    except Exception as e:
+        await message.answer(f"❌ Ошибка: {str(e)}")
+
+@router.message(F.text.startswith("/restore_"), admin_filter)
+async def cmd_restore_selected(message: Message):
+    """Восстановить из конкретного бэкапа"""
+    try:
+        # Получаем номер бэкапа из команды
+        cmd_parts = message.text.split("_")
+        if len(cmd_parts) != 2:
+            await message.answer("❌ Неверный формат команды")
+            return
+        
+        try:
+            backup_index = int(cmd_parts[1])
+        except ValueError:
+            await message.answer("❌ Неверный номер бэкапа")
+            return
+        
+        backups = db_manager.list_backups()
+        if not 1 <= backup_index <= min(5, len(backups)):
+            await message.answer("❌ Неверный номер бэкапа")
+            return
+        
+        # Выбираем бэкап (последние 5, reverse order)
+        selected_backup = list(reversed(backups[-5:]))[backup_index - 1]
+        
+        # Восстанавливаем
+        success = db_manager.restore_from_backup(selected_backup["path"])
+        
+        if success:
+            # Получаем информацию о восстановленной БД
+            db_info = db_manager.get_db_info()
+            
+            response = (
+                f"✅ <b>БД успешно восстановлена!</b>\n\n"
+                f"📁 Из: {selected_backup['name']}\n"
+                f"📅 Дата бэкапа: {selected_backup['created'].strftime('%d.%m.%Y %H:%M')}\n"
+                f"📊 Размер: {db_info.get('size_mb', 0):.2f} MB\n"
+                f"📂 Таблиц: {len(db_info.get('tables', []))}\n\n"
+                f"🔄 <b>Перезапустите бота для применения изменений!</b>"
+            )
+        else:
+            response = "❌ Не удалось восстановить БД"
+        
+        await message.answer(response, parse_mode="HTML")
+        
+    except Exception as e:
+        await message.answer(f"❌ Ошибка восстановления: {str(e)}")
+
+@router.message(Command("dbinfo"), admin_filter)
+async def cmd_dbinfo(message: Message):
+    """Информация о базе данных"""
+    try:
+        db_info = db_manager.get_db_info()
+        metadata = db_manager.load_metadata()
+        backups = db_manager.list_backups()
+        
+        response = "💾 <b>Информация о базе данных:</b>\n\n"
+        
+        if db_info["exists"]:
+            response += (
+                f"📁 Файл: {os.path.basename(db_manager.db_path)}\n"
+                f"📊 Размер: {db_info.get('size_mb', 0):.2f} MB\n"
+                f"📂 Таблиц: {len(db_info.get('tables', []))}\n"
+                f"📅 Изменен: {db_info.get('last_modified', 'N/A')}\n\n"
+            )
+            
+            # Статистика по таблицам
+            if db_info.get("table_stats"):
+                response += "📈 <b>Статистика таблиц:</b>\n"
+                for table, count in db_info["table_stats"].items():
+                    response += f"  {table}: {count} записей\n"
+                response += "\n"
+        
+        # Информация о бэкапах
+        response += f"📂 <b>Бэкапы:</b> {len(backups)} файлов\n"
+        if backups:
+            latest = backups[-1]
+            response += (
+                f"Последний: {latest['name']}\n"
+                f"Создан: {latest['created'].strftime('%d.%m.%Y %H:%M')}\n"
+                f"Размер: {latest['size_mb']:.2f} MB\n"
+            )
+        
+        # Метаданные
+        if metadata:
+            response += f"\n📋 <b>Метаданные:</b>\n"
+            response += f"Версия: {metadata.get('version', 'N/A')}\n"
+            response += f"Последний бэкап: {metadata.get('last_backup', 'N/A')}"
+        
+        await message.answer(response, parse_mode="HTML")
+        
+    except Exception as e:
+        await message.answer(f"❌ Ошибка: {str(e)}")
+
+@router.message(Command("cleanbackups"), admin_filter)
+async def cmd_cleanbackups(message: Message):
+    """Очистить старые бэкапы"""
+    try:
+        deleted = db_manager.cleanup_old_backups()
+        
+        if deleted > 0:
+            response = f"🧹 Удалено старых бэкапов: {deleted}"
+        else:
+            response = "📭 Старых бэкапов не найдено"
+        
+        await message.answer(response)
+        
+    except Exception as e:
+        await message.answer(f"❌ Ошибка очистки бэкапов: {str(e)}")
+
+@router.message(Command("exportdb"), admin_filter)
+async def cmd_exportdb(message: Message):
+    """Экспортировать БД в SQL"""
+    try:
+        success = db_manager.export_to_sql()
+        
+        if success:
+            sql_file = 'data/database_export.sql'
+            if os.path.exists(sql_file):
+                await message.answer_document(
+                    FSInputFile(sql_file),
+                    caption="✅ БД экспортирована в SQL формат"
+                )
+            else:
+                await message.answer("✅ БД экспортирована, но файл не найден")
+        else:
+            await message.answer("❌ Ошибка экспорта БД")
+            
+    except Exception as e:
+        await message.answer(f"❌ Ошибка экспорта: {str(e)}")
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
 
 # ==================== ИСПРАВЛЕННЫЕ ОБРАБОТЧИКИ ЦЕН ====================
 
