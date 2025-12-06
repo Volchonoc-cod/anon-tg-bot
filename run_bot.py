@@ -30,35 +30,67 @@ async def run_bot():
     try:
         logger.info("🔄 Инициализация бота...")
         
-        # 1. Инициализируем менеджер БД (автовосстановление при запуске)
-        logger.info("💾 Инициализация менеджера БД...")
-        restored = init_database_manager()
-        if restored:
-            logger.info("✅ БД восстановлена из последнего бэкапа")
+        # 1. Создаем папку data если не существует
+        os.makedirs('data', exist_ok=True)
+        os.makedirs('backups', exist_ok=True)
+        os.makedirs('logs', exist_ok=True)
         
-        # 2. Показываем информацию о БД
-        db_info = db_manager.get_db_info()
-        logger.info(f"📊 Информация о БД: {db_info.get('size_mb', 0):.2f} MB, таблиц: {len(db_info.get('tables', []))}")
+        logger.info("📁 Папки созданы: data, backups, logs")
+        
+        # 2. Проверяем существует ли БД
+        db_path = 'data/bot.db'
+        if not os.path.exists(db_path):
+            logger.info("📝 База данных не найдена, будет создана новая")
+        else:
+            size = os.path.getsize(db_path)
+            logger.info(f"📊 Существующая БД найдена: {size} байт")
+        
+        # 3. Инициализируем менеджер БД (автовосстановление при запуске)
+        logger.info("💾 Инициализация менеджера БД...")
+        try:
+            restored = init_database_manager()
+            if restored:
+                logger.info("✅ БД восстановлена из последнего бэкапа")
+            else:
+                logger.info("✅ Восстановление БД не требовалось")
+        except Exception as e:
+            logger.error(f"❌ Ошибка инициализации менеджера БД: {e}")
+            # Продолжаем работу даже если менеджер БД упал
+        
+        # 4. Показываем информацию о БД
+        try:
+            db_info = db_manager.get_db_info()
+            logger.info(f"📊 Информация о БД: {db_info.get('size_mb', 0):.2f} MB, таблиц: {len(db_info.get('tables', []))}")
+        except Exception as e:
+            logger.error(f"❌ Ошибка получения информации о БД: {e}")
+            db_info = {"exists": False, "size_mb": 0, "tables": []}
         
         from app.config import BOT_TOKEN, ADMIN_IDS, IS_RENDER
         from app.database import create_tables
         from aiogram import Bot, Dispatcher
         from aiogram.fsm.storage.memory import MemoryStorage
         
-        # Создаем необходимые папки
-        os.makedirs('data', exist_ok=True)
-        os.makedirs('backups', exist_ok=True)
-        os.makedirs('logs', exist_ok=True)
-        
         # Создаем таблицы БД
-        create_tables()
-        logger.info("✅ Таблицы БД созданы")
+        logger.info("🔄 Создание таблиц БД...")
+        try:
+            create_tables()
+            logger.info("✅ Таблицы БД созданы")
+        except Exception as e:
+            logger.error(f"❌ Ошибка создания таблиц БД: {e}")
+            # Продолжаем работу, возможно таблицы уже существуют
         
         # Создаем начальный бэкап если это первый запуск
-        backups = db_manager.list_backups()
-        if len(backups) == 0:
-            logger.info("📝 Создание начального бэкапа...")
-            db_manager.create_backup("initial_backup.db")
+        try:
+            backups = db_manager.list_backups()
+            if len(backups) == 0:
+                logger.info("📝 Создание начального бэкапа...")
+                backup_result = db_manager.create_backup("initial_backup.db")
+                if backup_result:
+                    logger.info(f"✅ Начальный бэкап создан: {backup_result}")
+                else:
+                    logger.warning("⚠️ Не удалось создать начальный бэкап")
+        except Exception as e:
+            logger.error(f"❌ Ошибка создания начального бэкапа: {e}")
         
         # Инициализация бота
         bot = Bot(token=BOT_TOKEN)
@@ -86,9 +118,13 @@ async def run_bot():
         
         # Отправляем уведомление админам о запуске
         try:
-            # Добавляем информацию о БД в сообщение
-            db_info = db_manager.get_db_info()
-            backup_count = len(db_manager.list_backups())
+            # Получаем актуальную информацию о БД
+            try:
+                db_info = db_manager.get_db_info()
+                backup_count = len(db_manager.list_backups())
+            except:
+                db_info = {"size_mb": 0}
+                backup_count = 0
             
             message = (
                 f"🚀 <b>Бот запущен!</b>\n\n"
@@ -98,7 +134,8 @@ async def run_bot():
                 f"👥 Админов: {len(ADMIN_IDS)}\n"
                 f"💾 БД: {db_info.get('size_mb', 0):.2f} MB\n"
                 f"📂 Бэкапов: {backup_count}\n"
-                f"🔄 Восстановлено: {'✅ Да' if restored else '❌ Нет'}"
+                f"📝 /backup - создать бэкап\n"
+                f"📋 /backups - список бэкапов"
             )
             
             for admin_id in ADMIN_IDS:
@@ -138,7 +175,10 @@ async def run_bot():
             pass
         
         # Создаем бэкап перед выходом при ошибке
-        db_manager.create_backup_on_exit()
+        try:
+            db_manager.create_backup_on_exit()
+        except:
+            pass
         
         sys.exit(1)
 
@@ -147,7 +187,10 @@ def handle_shutdown(signum, frame):
     logger.info(f"🛑 Получен сигнал {signum}. Завершаю работу...")
     
     # Создаем бэкап перед выходом
-    db_manager.create_backup_on_exit()
+    try:
+        db_manager.create_backup_on_exit()
+    except Exception as e:
+        logger.error(f"❌ Ошибка создания бэкапа при выходе: {e}")
     
     sys.exit(0)
 
@@ -162,8 +205,17 @@ def main():
         asyncio.run(run_bot())
     except KeyboardInterrupt:
         logger.info("🛑 Бот остановлен пользователем")
+        # Создаем бэкап при ручной остановке
+        try:
+            db_manager.create_backup_on_exit()
+        except:
+            pass
     except Exception as e:
         logger.error(f"❌ Бот аварийно завершил работу: {e}")
+        try:
+            db_manager.create_backup_on_exit()
+        except:
+            pass
         sys.exit(1)
 
 async def run_bot_async():
@@ -179,16 +231,21 @@ async def run_bot_async():
         from app.config import BOT_TOKEN, ADMIN_IDS, IS_RENDER
         from app.database import create_tables
         
-        # 1. Инициализируем менеджер БД
-        print("💾 Инициализация менеджера БД...")
-        restored = init_database_manager()
-        if restored:
-            print("✅ БД восстановлена из последнего бэкапа")
-        
-        # Создаем папки
+        # 1. Создаем папки
         import os
         os.makedirs('data', exist_ok=True)
         os.makedirs('backups', exist_ok=True)
+        
+        # 2. Инициализируем менеджер БД
+        print("💾 Инициализация менеджера БД...")
+        try:
+            restored = init_database_manager()
+            if restored:
+                print("✅ БД восстановлена из последнего бэкапа")
+            else:
+                print("✅ Восстановление БД не требовалось")
+        except Exception as e:
+            print(f"⚠️ Ошибка менеджера БД: {e}")
         
         # Создаем таблицы - ТЕПЕРЬ модели загружены
         print("🔄 Создание таблиц БД...")
@@ -231,8 +288,12 @@ async def run_bot_async():
         
         # Уведомление админам о запуске
         try:
-            db_info = db_manager.get_db_info()
-            backup_count = len(db_manager.list_backups())
+            try:
+                db_info = db_manager.get_db_info()
+                backup_count = len(db_manager.list_backups())
+            except:
+                db_info = {"size_mb": 0}
+                backup_count = 0
             
             message = (
                 f"🚀 <b>Бот запущен на Render!</b>\n\n"
@@ -241,7 +302,8 @@ async def run_bot_async():
                 f"✅ Авто-пинг включен\n"
                 f"💾 БД: {db_info.get('size_mb', 0):.2f} MB\n"
                 f"📂 Бэкапов: {backup_count}\n"
-                f"🔄 Восстановлено: {'✅ Да' if restored else '❌ Нет'}"
+                f"📝 /backup - создать бэкап\n"
+                f"📋 /backups - список бэкапов"
             )
             
             for admin_id in ADMIN_IDS:
@@ -260,7 +322,10 @@ async def run_bot_async():
         print(f"❌ Критическая ошибка в run_bot_async: {e}")
         
         # Создаем бэкап перед выходом при ошибке
-        db_manager.create_backup_on_exit()
+        try:
+            db_manager.create_backup_on_exit()
+        except:
+            pass
         
         import traceback
         traceback.print_exc()
