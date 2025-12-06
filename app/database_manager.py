@@ -9,8 +9,7 @@ import asyncio
 from datetime import datetime, timedelta
 import logging
 from typing import Optional, List, Dict, Any
-import signal
-import sys
+import traceback
 
 logger = logging.getLogger(__name__)
 
@@ -18,14 +17,15 @@ logger = logging.getLogger(__name__)
 class DatabaseManager:
     """Класс для управления базой данных с бэкапами"""
     
-    def __init__(self, db_path: str = 'data/bot.db'):
-        self.db_path = db_path
+    def __init__(self, db_path: str = None):
+        self.db_path = self._find_or_create_db(db_path)
         self.backup_dir = 'backups'
         self.metadata_file = 'data/db_metadata.json'
         
         # Создаем необходимые директории
         os.makedirs(os.path.dirname(self.db_path), exist_ok=True)
         os.makedirs(self.backup_dir, exist_ok=True)
+        os.makedirs(os.path.dirname(self.metadata_file), exist_ok=True)
         
         # Настройки
         self.auto_backup_on_exit = True
@@ -33,11 +33,49 @@ class DatabaseManager:
         self.max_backups = 10
         
         logger.info(f"📊 Менеджер БД инициализирован: {self.db_path}")
+        logger.info(f"📁 Директория бэкапов: {self.backup_dir}")
+    
+    def _find_or_create_db(self, db_path: str = None) -> str:
+        """Найти существующую БД или определить путь для новой"""
+        if db_path and os.path.exists(db_path):
+            logger.info(f"✅ Используется указанный путь к БД: {db_path}")
+            return db_path
+        
+        # Ищем БД в возможных местах
+        possible_paths = [
+            'data/bot.db',
+            'bot.db',
+            './bot.db',
+            os.path.join(os.getcwd(), 'bot.db'),
+            os.path.join(os.getcwd(), 'data', 'bot.db'),
+            os.path.join('/opt/render/project/src', 'data', 'bot.db'),
+            os.path.join('/opt/render/project/src', 'bot.db'),
+        ]
+        
+        for path in possible_paths:
+            if os.path.exists(path):
+                logger.info(f"🔍 Найдена БД: {path}")
+                return path
+        
+        # Если БД не найдена, создаем в data/bot.db
+        default_path = 'data/bot.db'
+        os.makedirs(os.path.dirname(default_path), exist_ok=True)
+        logger.info(f"📝 БД не найдена, будет создана новая: {default_path}")
+        
+        # Создаем пустую БД для инициализации
+        try:
+            conn = sqlite3.connect(default_path)
+            conn.close()
+            logger.info(f"✅ Создана пустая БД: {default_path}")
+        except Exception as e:
+            logger.error(f"❌ Ошибка создания БД: {e}")
+        
+        return default_path
     
     def get_db_info(self) -> Dict[str, Any]:
         """Получить информацию о базе данных"""
         if not os.path.exists(self.db_path):
-            return {"exists": False, "size": 0, "tables": []}
+            return {"exists": False, "size": 0, "tables": [], "error": "Файл не найден"}
         
         try:
             size = os.path.getsize(self.db_path)
@@ -50,18 +88,37 @@ class DatabaseManager:
             cursor.execute("SELECT name FROM sqlite_master WHERE type='table'")
             tables = [row[0] for row in cursor.fetchall()]
             
+            # Получаем статистику по таблицам
+            table_stats = {}
+            for table in tables:
+                try:
+                    cursor.execute(f"SELECT COUNT(*) FROM {table}")
+                    count = cursor.fetchone()[0]
+                    table_stats[table] = count
+                except Exception as e:
+                    logger.warning(f"⚠️ Не удалось получить статистику для таблицы {table}: {e}")
+                    table_stats[table] = 0
+            
             conn.close()
+            
+            last_modified = datetime.fromtimestamp(os.path.getmtime(self.db_path))
+            created = datetime.fromtimestamp(os.path.getctime(self.db_path)) if os.path.exists(self.db_path) else None
             
             return {
                 "exists": True,
+                "path": self.db_path,
                 "size": size,
-                "size_mb": size / (1024 * 1024),
+                "size_mb": round(size / (1024 * 1024), 2),
                 "tables": tables,
-                "last_modified": datetime.fromtimestamp(os.path.getmtime(self.db_path))
+                "table_count": len(tables),
+                "table_stats": table_stats,
+                "last_modified": last_modified,
+                "created": created,
+                "status": "ok"
             }
         except Exception as e:
             logger.error(f"❌ Ошибка получения информации о БД: {e}")
-            return {"exists": False, "error": str(e)}
+            return {"exists": False, "error": str(e), "status": "error"}
     
     def save_metadata(self):
         """Сохранить метаданные базы данных"""
@@ -71,24 +128,30 @@ class DatabaseManager:
                 "last_backup": datetime.now().isoformat(),
                 "backup_count": len(self.list_backups()),
                 "db_info": self.get_db_info(),
-                "version": "1.0"
+                "version": "1.0",
+                "timestamp": datetime.now().isoformat()
             }
             
             with open(self.metadata_file, 'w', encoding='utf-8') as f:
                 json.dump(metadata, f, indent=2, default=str)
             
-            logger.info("✅ Метаданные БД сохранены")
+            logger.debug("✅ Метаданные БД сохранены")
+            return True
         except Exception as e:
             logger.error(f"❌ Ошибка сохранения метаданных: {e}")
+            return False
     
     def load_metadata(self) -> Optional[Dict[str, Any]]:
         """Загрузить метаданные базы данных"""
         if not os.path.exists(self.metadata_file):
+            logger.debug("ℹ️ Файл метаданных не найден")
             return None
         
         try:
             with open(self.metadata_file, 'r', encoding='utf-8') as f:
-                return json.load(f)
+                metadata = json.load(f)
+            logger.debug("✅ Метаданные БД загружены")
+            return metadata
         except Exception as e:
             logger.error(f"❌ Ошибка загрузки метаданных: {e}")
             return None
@@ -98,23 +161,21 @@ class DatabaseManager:
         try:
             # Проверяем существует ли файл БД
             if not os.path.exists(self.db_path):
-                # Пытаемся найти БД в другом месте
-                possible_paths = [
-                    self.db_path,
-                    'bot.db',
-                    './bot.db',
-                    os.path.join(os.getcwd(), 'bot.db'),
-                    os.path.join(os.getcwd(), 'data', 'bot.db')
-                ]
+                logger.warning(f"⚠️ Файл БД не найден: {self.db_path}")
+                logger.info(f"📝 Создаю пустую БД для бэкапа: {self.db_path}")
                 
-                for path in possible_paths:
-                    if os.path.exists(path):
-                        self.db_path = path
-                        logger.info(f"🔍 Найдена БД по пути: {path}")
-                        break
-                else:
-                    logger.error(f"❌ Файл БД не найден по путям: {possible_paths}")
+                # Создаем пустую БД
+                conn = sqlite3.connect(self.db_path)
+                conn.close()
+                
+                if not os.path.exists(self.db_path):
+                    logger.error("❌ Не удалось создать БД для бэкапа")
                     return None
+            
+            # Проверяем размер БД
+            db_size = os.path.getsize(self.db_path)
+            if db_size == 0:
+                logger.warning("⚠️ БД пустая (0 байт), создаю бэкап пустой БД")
             
             # Генерируем имя файла
             if backup_name is None:
@@ -123,16 +184,23 @@ class DatabaseManager:
             
             backup_path = os.path.join(self.backup_dir, backup_name)
             
+            logger.info(f"💾 Создание бэкапа: {backup_name}")
+            
             # Создаем бэкап
             shutil.copy2(self.db_path, backup_path)
             
             # Проверяем что файл создался
             if os.path.exists(backup_path):
                 file_size = os.path.getsize(backup_path)
-                logger.info(f"✅ Бэкап создан: {backup_name} ({file_size} байт)")
+                logger.info(f"✅ Бэкап создан: {backup_name} ({file_size:,} байт)")
                 
                 # Сохраняем метаданные
                 self.save_metadata()
+                
+                # Очищаем старые бэкапы
+                deleted = self.cleanup_old_backups()
+                if deleted > 0:
+                    logger.info(f"🧹 Удалено {deleted} старых бэкапов")
                 
                 return backup_path
             else:
@@ -141,13 +209,12 @@ class DatabaseManager:
                 
         except Exception as e:
             logger.error(f"❌ Ошибка создания бэкапа: {e}")
-            import traceback
-            traceback.print_exc()
             return None
     
     def create_backup_on_exit(self):
         """Создать бэкап при выходе из приложения"""
         if not self.auto_backup_on_exit:
+            logger.debug("ℹ️ Автобэкап при выходе отключен")
             return
         
         logger.info("💾 Создание бэкапа перед выходом...")
@@ -158,7 +225,21 @@ class DatabaseManager:
             logger.info("⏭️ Последний бэкап создан менее 5 минут назад, пропускаю")
             return
         
-        self.create_backup("exit_backup.db")
+        # Проверяем что БД существует и не пустая
+        if not os.path.exists(self.db_path):
+            logger.warning("⚠️ БД не существует, пропускаю бэкап")
+            return
+        
+        db_size = os.path.getsize(self.db_path)
+        if db_size < 1024:  # Меньше 1KB
+            logger.warning(f"⚠️ БД слишком мала ({db_size} байт), пропускаю бэкап")
+            return
+        
+        result = self.create_backup("exit_backup.db")
+        if result:
+            logger.info(f"✅ Бэкап перед выходом создан: {result}")
+        else:
+            logger.warning("⚠️ Не удалось создать бэкап перед выходом")
     
     def restore_from_backup(self, backup_path: str) -> bool:
         """Восстановить базу данных из бэкапа"""
@@ -167,18 +248,33 @@ class DatabaseManager:
                 logger.error(f"❌ Файл бэкапа не найден: {backup_path}")
                 return False
             
+            # Проверяем валидность бэкапа
+            if not self.validate_backup(backup_path):
+                logger.warning(f"⚠️ Бэкап может быть поврежден: {backup_path}")
+                # Все равно пытаемся восстановить
+            
             # Создаем бэкап текущей БД (если существует)
             if os.path.exists(self.db_path):
                 timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
                 old_backup = os.path.join(self.backup_dir, f"before_restore_{timestamp}.db")
-                shutil.copy2(self.db_path, old_backup)
-                logger.info(f"💾 Сохранена текущая БД перед восстановлением: {old_backup}")
+                try:
+                    shutil.copy2(self.db_path, old_backup)
+                    logger.info(f"💾 Сохранена текущая БД перед восстановлением: {old_backup}")
+                except Exception as e:
+                    logger.warning(f"⚠️ Не удалось сохранить текущую БД: {e}")
             
             # Восстанавливаем из бэкапа
+            logger.info(f"🔄 Восстановление БД из бэкапа: {backup_path}")
             shutil.copy2(backup_path, self.db_path)
             
-            logger.info(f"✅ БД восстановлена из бэкапа: {backup_path}")
-            return True
+            # Проверяем что восстановление успешно
+            if os.path.exists(self.db_path):
+                new_size = os.path.getsize(self.db_path)
+                logger.info(f"✅ БД восстановлена из бэкапа: {backup_path} ({new_size:,} байт)")
+                return True
+            else:
+                logger.error(f"❌ БД не была восстановлена")
+                return False
             
         except Exception as e:
             logger.error(f"❌ Ошибка восстановления из бэкапа: {e}")
@@ -187,9 +283,10 @@ class DatabaseManager:
     def auto_restore_on_startup(self) -> bool:
         """Автоматическое восстановление при запуске"""
         if not self.auto_restore_on_start:
+            logger.debug("ℹ️ Автовосстановление отключено")
             return False
         
-        logger.info("🔍 Проверка необходимости восстановления БД...")
+        logger.info("🔍 Проверка необходимости восстановления БД при запуске...")
         
         # Проверяем состояние текущей БД
         db_info = self.get_db_info()
@@ -205,10 +302,15 @@ class DatabaseManager:
             logger.warning("⚠️ Бэкапы не найдены, восстановление невозможно")
             return False
         
-        latest_backup = backups[-1]["path"]
-        logger.info(f"🔄 Восстанавливаю БД из последнего бэкапа: {latest_backup}")
+        # Берем последний валидный бэкап
+        for backup in reversed(backups):
+            if self.validate_backup(backup["path"]):
+                latest_backup = backup["path"]
+                logger.info(f"🔄 Восстанавливаю БД из последнего валидного бэкапа: {os.path.basename(latest_backup)}")
+                return self.restore_from_backup(latest_backup)
         
-        return self.restore_from_backup(latest_backup)
+        logger.warning("⚠️ Валидные бэкапы не найдены")
+        return False
     
     def get_last_backup_time(self) -> Optional[datetime]:
         """Получить время последнего бэкапа"""
@@ -224,31 +326,56 @@ class DatabaseManager:
         backups = []
         
         if not os.path.exists(self.backup_dir):
+            logger.debug(f"ℹ️ Директория бэкапов не найдена: {self.backup_dir}")
             return backups
         
-        for filename in os.listdir(self.backup_dir):
-            if filename.endswith('.db'):
-                filepath = os.path.join(self.backup_dir, filename)
-                stat = os.stat(filepath)
-                
-                backup_info = {
-                    "name": filename,
-                    "path": filepath,
-                    "size": stat.st_size,
-                    "size_mb": stat.st_size / (1024 * 1024),
-                    "created": datetime.fromtimestamp(stat.st_ctime),
-                    "modified": datetime.fromtimestamp(stat.st_mtime),
-                }
-                
-                backups.append(backup_info)
-        
-        # Сортируем по дате создания (старые сначала)
-        backups.sort(key=lambda x: x["created"])
-        return backups
+        try:
+            for filename in sorted(os.listdir(self.backup_dir)):
+                if filename.endswith('.db'):
+                    filepath = os.path.join(self.backup_dir, filename)
+                    try:
+                        stat = os.stat(filepath)
+                        
+                        # Проверяем валидность бэкапа
+                        is_valid = self.validate_backup(filepath)
+                        
+                        backup_info = {
+                            "name": filename,
+                            "path": filepath,
+                            "size": stat.st_size,
+                            "size_mb": round(stat.st_size / (1024 * 1024), 2),
+                            "created": datetime.fromtimestamp(stat.st_ctime),
+                            "modified": datetime.fromtimestamp(stat.st_mtime),
+                            "is_valid": is_valid,
+                            "age_days": (datetime.now() - datetime.fromtimestamp(stat.st_ctime)).days
+                        }
+                        
+                        backups.append(backup_info)
+                    except Exception as e:
+                        logger.warning(f"⚠️ Ошибка чтения бэкапа {filename}: {e}")
+            
+            # Сортируем по дате создания (старые сначала)
+            backups.sort(key=lambda x: x["created"])
+            logger.debug(f"ℹ️ Найдено {len(backups)} бэкапов")
+            return backups
+            
+        except Exception as e:
+            logger.error(f"❌ Ошибка получения списка бэкапов: {e}")
+            return []
     
     def validate_backup(self, backup_path: str) -> bool:
         """Проверить валидность бэкапа"""
+        if not os.path.exists(backup_path):
+            return False
+        
         try:
+            # Проверяем размер файла
+            file_size = os.path.getsize(backup_path)
+            if file_size == 0:
+                logger.debug(f"⚠️ Бэкап пустой: {backup_path}")
+                return False
+            
+            # Пытаемся подключиться к БД
             conn = sqlite3.connect(f"file:{backup_path}?mode=ro", uri=True)
             cursor = conn.cursor()
             
@@ -258,13 +385,16 @@ class DatabaseManager:
             
             conn.close()
             
-            # Проверяем наличие основных таблиц
-            required_tables = {'users', 'anon_messages', 'payments'}
-            has_required = any(table in tables for table in required_tables)
+            # Проверяем наличие хотя бы одной таблицы
+            if len(tables) == 0:
+                logger.debug(f"⚠️ Бэкап не содержит таблиц: {backup_path}")
+                return False
             
-            return has_required and len(tables) > 0
+            logger.debug(f"✅ Бэкап валиден: {backup_path} (таблиц: {len(tables)})")
+            return True
             
-        except Exception:
+        except Exception as e:
+            logger.debug(f"⚠️ Бэкап невалиден {backup_path}: {e}")
             return False
     
     def cleanup_old_backups(self) -> int:
@@ -281,13 +411,18 @@ class DatabaseManager:
             
             for backup in to_delete:
                 try:
+                    # Не удаляем валидные бэкапы, если их мало
+                    if backup.get("is_valid", False) and len(backups) <= self.max_backups * 2:
+                        continue
+                    
                     os.remove(backup["path"])
                     deleted_count += 1
-                    logger.info(f"🗑️ Удален старый бэкап: {backup['name']}")
+                    logger.debug(f"🗑️ Удален старый бэкап: {backup['name']}")
                 except Exception as e:
-                    logger.error(f"❌ Ошибка удаления бэкапа {backup['name']}: {e}")
+                    logger.warning(f"⚠️ Ошибка удаления бэкапа {backup['name']}: {e}")
             
-            logger.info(f"🧹 Удалено старых бэкапов: {deleted_count}")
+            if deleted_count > 0:
+                logger.info(f"🧹 Удалено старых бэкапов: {deleted_count}")
             return deleted_count
             
         except Exception as e:
@@ -309,7 +444,13 @@ class DatabaseManager:
     def export_to_sql(self, sql_file: str = 'data/database_export.sql') -> bool:
         """Экспорт базы данных в SQL файл"""
         try:
+            if not os.path.exists(self.db_path):
+                logger.error(f"❌ Файл БД не найден: {self.db_path}")
+                return False
+            
             conn = sqlite3.connect(self.db_path)
+            
+            os.makedirs(os.path.dirname(sql_file), exist_ok=True)
             
             with open(sql_file, 'w', encoding='utf-8') as f:
                 # Пишем информацию о бэкапе
@@ -335,6 +476,10 @@ class DatabaseManager:
                     
                     f.write(f"-- Data for table: {table}\n")
                     
+                    cursor.execute(f"SELECT COUNT(*) FROM {table}")
+                    count = cursor.fetchone()[0]
+                    f.write(f"-- Records: {count}\n")
+                    
                     for row in cursor.fetchall():
                         values = []
                         for value in row:
@@ -355,7 +500,9 @@ class DatabaseManager:
                 f.write("COMMIT;\n")
             
             conn.close()
-            logger.info(f"✅ БД экспортирована в SQL: {sql_file}")
+            
+            file_size = os.path.getsize(sql_file) if os.path.exists(sql_file) else 0
+            logger.info(f"✅ БД экспортирована в SQL: {sql_file} ({file_size:,} байт)")
             return True
             
         except Exception as e:
@@ -368,6 +515,9 @@ class DatabaseManager:
             if not os.path.exists(sql_file):
                 logger.error(f"❌ SQL файл не найден: {sql_file}")
                 return False
+            
+            # Создаем бэкап перед импортом
+            self.create_backup("before_import.db")
             
             conn = sqlite3.connect(self.db_path)
             cursor = conn.cursor()
@@ -403,16 +553,19 @@ class DatabaseManager:
                 
                 backup_table_stats = {}
                 for table in backup_tables:
-                    temp_cursor.execute(f"SELECT COUNT(*) FROM {table}")
-                    count = temp_cursor.fetchone()[0]
-                    backup_table_stats[table] = count
+                    try:
+                        temp_cursor.execute(f"SELECT COUNT(*) FROM {table}")
+                        count = temp_cursor.fetchone()[0]
+                        backup_table_stats[table] = count
+                    except:
+                        backup_table_stats[table] = 0
                 
                 temp_conn.close()
                 
                 backup_info = {
                     "tables": backup_tables,
                     "table_stats": backup_table_stats,
-                    "size": os.path.getsize(backup_path)
+                    "size": os.path.getsize(backup_path) if os.path.exists(backup_path) else 0
                 }
             
             # Сравниваем
@@ -468,7 +621,10 @@ def backup_on_exit(func):
             return result
         finally:
             # Создаем бэкап при выходе
-            db_manager.create_backup_on_exit()
+            try:
+                db_manager.create_backup_on_exit()
+            except Exception as e:
+                logger.error(f"❌ Ошибка в декораторе backup_on_exit: {e}")
     
     async def async_wrapper(*args, **kwargs):
         try:
@@ -476,14 +632,26 @@ def backup_on_exit(func):
             return result
         finally:
             # Создаем бэкап при выходе
-            db_manager.create_backup_on_exit()
+            try:
+                db_manager.create_backup_on_exit()
+            except Exception as e:
+                logger.error(f"❌ Ошибка в декораторе backup_on_exit (async): {e}")
     
     return async_wrapper if asyncio.iscoroutinefunction(func) else wrapper
 
 
 # Инициализация при импорте
+_db_initialized = False
+
 def init_database_manager() -> bool:
     """Инициализация менеджера БД при запуске"""
+    global _db_initialized
+    
+    if _db_initialized:
+        logger.debug("ℹ️ Менеджер БД уже инициализирован")
+        return False
+    
+    _db_initialized = True
     logger.info("🚀 Инициализация менеджера БД...")
     
     # Автоматическое восстановление при запуске
@@ -491,14 +659,23 @@ def init_database_manager() -> bool:
     
     # Создаем начальный бэкап если БД только что создана
     db_info = db_manager.get_db_info()
-    if db_info["exists"] and len(db_manager.list_backups()) == 0:
+    backups = db_manager.list_backups()
+    
+    if db_info["exists"] and len(backups) == 0:
         logger.info("📝 Создание начального бэкапа...")
-        db_manager.create_backup("initial_backup.db")
+        result = db_manager.create_backup("initial_backup.db")
+        if result:
+            logger.info(f"✅ Начальный бэкап создан: {result}")
+        else:
+            logger.warning("⚠️ Не удалось создать начальный бэкап")
     
     logger.info("✅ Менеджер БД готов к работе")
     return restored
 
 
-# Автоматическая инициализация при импорте
+# Инициализируем при импорте
 if __name__ != "__main__":
-    init_database_manager()
+    try:
+        init_database_manager()
+    except Exception as e:
+        logger.error(f"❌ Ошибка при автоматической инициализации менеджера БД: {e}")
