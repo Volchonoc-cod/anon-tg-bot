@@ -6,11 +6,9 @@ import sqlite3
 import shutil
 import json
 import asyncio
-import aiosqlite
 from datetime import datetime, timedelta
 import logging
 from typing import Optional, List, Dict, Any
-import threading
 import signal
 import sys
 
@@ -33,30 +31,8 @@ class DatabaseManager:
         self.auto_backup_on_exit = True
         self.auto_restore_on_start = True
         self.max_backups = 10
-        self.backup_interval_hours = 24
-        
-        # Флаг для отслеживания восстановления
-        self._restored = False
-        
-        # Регистрируем обработчики сигналов
-        self._setup_signal_handlers()
         
         logger.info(f"📊 Менеджер БД инициализирован: {self.db_path}")
-    
-    def _setup_signal_handlers(self):
-        """Настройка обработчиков сигналов для graceful shutdown"""
-        signal.signal(signal.SIGINT, self._signal_handler)
-        signal.signal(signal.SIGTERM, self._signal_handler)
-        
-        # Для Windows
-        if hasattr(signal, 'SIGBREAK'):
-            signal.signal(signal.SIGBREAK, self._signal_handler)
-    
-    def _signal_handler(self, signum, frame):
-        """Обработчик сигналов завершения"""
-        logger.info(f"📥 Получен сигнал {signum}, создаю бэкап перед выходом...")
-        self.create_backup_on_exit()
-        sys.exit(0)
     
     def get_db_info(self) -> Dict[str, Any]:
         """Получить информацию о базе данных"""
@@ -74,13 +50,6 @@ class DatabaseManager:
             cursor.execute("SELECT name FROM sqlite_master WHERE type='table'")
             tables = [row[0] for row in cursor.fetchall()]
             
-            # Получаем статистику по таблицам
-            table_stats = {}
-            for table in tables:
-                cursor.execute(f"SELECT COUNT(*) FROM {table}")
-                count = cursor.fetchone()[0]
-                table_stats[table] = count
-            
             conn.close()
             
             return {
@@ -88,7 +57,6 @@ class DatabaseManager:
                 "size": size,
                 "size_mb": size / (1024 * 1024),
                 "tables": tables,
-                "table_stats": table_stats,
                 "last_modified": datetime.fromtimestamp(os.path.getmtime(self.db_path))
             }
         except Exception as e:
@@ -161,8 +129,8 @@ class DatabaseManager:
         
         # Проверяем, нужно ли создавать бэкап
         last_backup = self.get_last_backup_time()
-        if last_backup and (datetime.now() - last_backup < timedelta(hours=1)):
-            logger.info("⏭️ Последний бэкап создан менее часа назад, пропускаю")
+        if last_backup and (datetime.now() - last_backup < timedelta(minutes=5)):
+            logger.info("⏭️ Последний бэкап создан менее 5 минут назад, пропускаю")
             return
         
         self.create_backup("exit_backup.db")
@@ -185,14 +153,13 @@ class DatabaseManager:
             shutil.copy2(backup_path, self.db_path)
             
             logger.info(f"✅ БД восстановлена из бэкапа: {backup_path}")
-            self._restored = True
             return True
             
         except Exception as e:
             logger.error(f"❌ Ошибка восстановления из бэкапа: {e}")
             return False
     
-    def auto_restore_on_startup(self):
+    def auto_restore_on_startup(self) -> bool:
         """Автоматическое восстановление при запуске"""
         if not self.auto_restore_on_start:
             return False
@@ -225,7 +192,7 @@ class DatabaseManager:
             return None
         
         latest_backup = backups[-1]
-        return latest_backup.get("modified")
+        return latest_backup.get("created")
     
     def list_backups(self) -> List[Dict[str, Any]]:
         """Получить список всех бэкапов"""
@@ -246,7 +213,6 @@ class DatabaseManager:
                     "size_mb": stat.st_size / (1024 * 1024),
                     "created": datetime.fromtimestamp(stat.st_ctime),
                     "modified": datetime.fromtimestamp(stat.st_mtime),
-                    "is_valid": self.validate_backup(filepath)
                 }
                 
                 backups.append(backup_info)
@@ -273,11 +239,10 @@ class DatabaseManager:
             
             return has_required and len(tables) > 0
             
-        except Exception as e:
-            logger.debug(f"Бэкап не валиден {backup_path}: {e}")
+        except Exception:
             return False
     
-    def cleanup_old_backups(self):
+    def cleanup_old_backups(self) -> int:
         """Очистить старые бэкапы"""
         try:
             backups = self.list_backups()
@@ -316,34 +281,61 @@ class DatabaseManager:
             None, self.restore_from_backup, backup_path
         )
     
-    def schedule_periodic_backups(self, interval_hours: int = 24):
-        """Запланировать периодические бэкапы"""
-        self.backup_interval_hours = interval_hours
-        
-        def backup_worker():
-            while True:
-                try:
-                    # Ждем указанный интервал
-                    time.sleep(interval_hours * 3600)
+    def export_to_sql(self, sql_file: str = 'data/database_export.sql') -> bool:
+        """Экспорт базы данных в SQL файл"""
+        try:
+            conn = sqlite3.connect(self.db_path)
+            
+            with open(sql_file, 'w', encoding='utf-8') as f:
+                # Пишем информацию о бэкапе
+                f.write(f"-- SQL Export from {self.db_path}\n")
+                f.write(f"-- Export time: {datetime.now().isoformat()}\n")
+                f.write("BEGIN TRANSACTION;\n\n")
+                
+                # Экспортируем схему
+                cursor = conn.cursor()
+                cursor.execute("SELECT sql FROM sqlite_master WHERE type='table' AND name NOT LIKE 'sqlite_%'")
+                
+                for row in cursor.fetchall():
+                    if row[0]:
+                        f.write(row[0] + ";\n\n")
+                
+                # Экспортируем данные
+                cursor.execute("SELECT name FROM sqlite_master WHERE type='table' AND name NOT LIKE 'sqlite_%'")
+                tables = [row[0] for row in cursor.fetchall()]
+                
+                for table in tables:
+                    cursor.execute(f"SELECT * FROM {table}")
+                    columns = [description[0] for description in cursor.description]
                     
-                    # Проверяем, нужно ли создавать бэкап
-                    last_backup = self.get_last_backup_time()
-                    if last_backup and (datetime.now() - last_backup < timedelta(hours=interval_hours)):
-                        continue
+                    f.write(f"-- Data for table: {table}\n")
                     
-                    logger.info(f"⏰ Создание периодического бэкапа (интервал: {interval_hours}ч)")
-                    self.create_backup()
-                    self.cleanup_old_backups()
+                    for row in cursor.fetchall():
+                        values = []
+                        for value in row:
+                            if value is None:
+                                values.append("NULL")
+                            elif isinstance(value, (int, float)):
+                                values.append(str(value))
+                            else:
+                                # Экранируем одинарные кавычки
+                                escaped_value = str(value).replace("'", "''")
+                                values.append(f"'{escaped_value}'")
+                        
+                        insert_sql = f"INSERT INTO {table} ({', '.join(columns)}) VALUES ({', '.join(values)});\n"
+                        f.write(insert_sql)
                     
-                except Exception as e:
-                    logger.error(f"❌ Ошибка в worker периодических бэкапов: {e}")
-                    time.sleep(60)  # Ждем минуту при ошибке
-        
-        # Запускаем в отдельном потоке
-        thread = threading.Thread(target=backup_worker, daemon=True)
-        thread.start()
-        logger.info(f"⏰ Периодические бэкапы запланированы каждые {interval_hours} часов")
-    
+                    f.write("\n")
+                
+                f.write("COMMIT;\n")
+            
+            conn.close()
+            logger.info(f"✅ БД экспортирована в SQL: {sql_file}")
+            return True
+            
+        except Exception as e:
+            logger.error(f"❌ Ошибка экспорта в SQL: {e}")
+            return False
     
     def import_from_sql(self, sql_file: str) -> bool:
         """Импорт базы данных из SQL файла"""
@@ -430,7 +422,7 @@ class DatabaseManager:
                 "current": current_info,
                 "backup": backup_info,
                 "differences": differences,
-                "has_changes": any(differences.values())
+                "has_changes": any(len(v) > 0 for v in differences.values() if isinstance(v, list))
             }
             
         except Exception as e:
@@ -465,15 +457,12 @@ def backup_on_exit(func):
 
 
 # Инициализация при импорте
-def init_database_manager():
+def init_database_manager() -> bool:
     """Инициализация менеджера БД при запуске"""
     logger.info("🚀 Инициализация менеджера БД...")
     
     # Автоматическое восстановление при запуске
     restored = db_manager.auto_restore_on_startup()
-    
-    # Запускаем периодические бэкапы
-    db_manager.schedule_periodic_backups(24)  # Каждые 24 часа
     
     # Создаем начальный бэкап если БД только что создана
     db_info = db_manager.get_db_info()
