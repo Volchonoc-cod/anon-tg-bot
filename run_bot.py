@@ -8,6 +8,10 @@ import logging
 from datetime import datetime
 import signal
 
+# Определяем, запущен ли бот отдельно или из render_server.py
+STANDALONE_BOT = __name__ == "__main__"
+
+# Настройка пути
 current_dir = os.path.dirname(os.path.abspath(__file__))
 sys.path.insert(0, current_dir)
 
@@ -18,36 +22,51 @@ logging.basicConfig(
     handlers=[
         logging.StreamHandler(sys.stdout),
         logging.FileHandler('bot.log')
-    ]
+    ] if STANDALONE_BOT else [logging.StreamHandler(sys.stdout)]
 )
 logger = logging.getLogger(__name__)
 
-# Импортируем менеджер БД
-from app.database_manager import db_manager, backup_on_exit, init_database_manager
+# Флаг для отслеживания запуска
+_bot_initialized = False
 
-async def run_bot():
-    """Основная функция запуска бота"""
+def setup_directories():
+    """Создание необходимых директорий"""
+    directories = ['data', 'backups', 'logs']
+    for directory in directories:
+        os.makedirs(directory, exist_ok=True)
+        logger.info(f"📁 Создана директория: {directory}")
+
+async def initialize_bot():
+    """Инициализация бота - вызывается только один раз"""
+    global _bot_initialized
+    
+    if _bot_initialized:
+        logger.warning("⚠️ Бот уже инициализирован, пропускаем повторную инициализацию")
+        return
+    
+    _bot_initialized = True
+    
     try:
         logger.info("🔄 Инициализация бота...")
         
-        # 1. Создаем папку data если не существует
-        os.makedirs('data', exist_ok=True)
-        os.makedirs('backups', exist_ok=True)
-        os.makedirs('logs', exist_ok=True)
+        # 1. Создаем папки
+        setup_directories()
         
-        logger.info("📁 Папки созданы: data, backups, logs")
+        # 2. Инициализируем конфигурацию
+        from app.config import BOT_TOKEN, ADMIN_IDS, IS_RENDER
         
-        # 2. Проверяем существует ли БД
-        db_path = 'data/bot.db'
-        if not os.path.exists(db_path):
-            logger.info("📝 База данных не найдена, будет создана новая")
-        else:
-            size = os.path.getsize(db_path)
-            logger.info(f"📊 Существующая БД найдена: {size} байт")
+        if not BOT_TOKEN:
+            raise ValueError("❌ BOT_TOKEN не найден в конфигурации")
         
-        # 3. Инициализируем менеджер БД (автовосстановление при запуске)
+        logger.info(f"✅ Конфигурация загружена: Bot Token = {BOT_TOKEN[:10]}...")
+        logger.info(f"✅ Админы: {ADMIN_IDS}")
+        logger.info(f"✅ Render: {IS_RENDER}")
+        
+        # 3. Инициализируем менеджер БД
         logger.info("💾 Инициализация менеджера БД...")
         try:
+            # Импортируем здесь, чтобы избежать циклических импортов
+            from app.database_manager import init_database_manager
             restored = init_database_manager()
             if restored:
                 logger.info("✅ БД восстановлена из последнего бэкапа")
@@ -55,79 +74,68 @@ async def run_bot():
                 logger.info("✅ Восстановление БД не требовалось")
         except Exception as e:
             logger.error(f"❌ Ошибка инициализации менеджера БД: {e}")
-            # Продолжаем работу даже если менеджер БД упал
+            # Продолжаем работу
         
-        # 4. Показываем информацию о БД
-        try:
-            db_info = db_manager.get_db_info()
-            logger.info(f"📊 Информация о БД: {db_info.get('size_mb', 0):.2f} MB, таблиц: {len(db_info.get('tables', []))}")
-        except Exception as e:
-            logger.error(f"❌ Ошибка получения информации о БД: {e}")
-            db_info = {"exists": False, "size_mb": 0, "tables": []}
-        
-        from app.config import BOT_TOKEN, ADMIN_IDS, IS_RENDER
+        # 4. Создаем таблицы БД
         from app.database import create_tables
-        from aiogram import Bot, Dispatcher
-        from aiogram.fsm.storage.memory import MemoryStorage
-        
-        # Создаем таблицы БД
         logger.info("🔄 Создание таблиц БД...")
         try:
             create_tables()
-            logger.info("✅ Таблицы БД созданы")
+            
+            # Проверяем таблицы
+            from sqlalchemy import inspect
+            from app.database import engine
+            inspector = inspect(engine)
+            tables = inspector.get_table_names()
+            logger.info(f"📊 Таблицы в БД: {tables}")
         except Exception as e:
             logger.error(f"❌ Ошибка создания таблиц БД: {e}")
-            # Продолжаем работу, возможно таблицы уже существуют
         
-        # Создаем начальный бэкап если это первый запуск
-        try:
-            backups = db_manager.list_backups()
-            if len(backups) == 0:
-                logger.info("📝 Создание начального бэкапа...")
-                backup_result = db_manager.create_backup("initial_backup.db")
-                if backup_result:
-                    logger.info(f"✅ Начальный бэкап создан: {backup_result}")
-                else:
-                    logger.warning("⚠️ Не удалось создать начальный бэкап")
-        except Exception as e:
-            logger.error(f"❌ Ошибка создания начального бэкапа: {e}")
+        # 5. Инициализируем самого бота
+        from aiogram import Bot, Dispatcher
+        from aiogram.fsm.storage.memory import MemoryStorage
         
-        # Инициализация бота
         bot = Bot(token=BOT_TOKEN)
         dp = Dispatcher(storage=MemoryStorage())
         
+        # 6. Регистрируем роутеры
+        logger.info("📋 Регистрация роутеров...")
+        
         # Импорт роутеров
-        from app.handlers.admin_panel import router as admin_router
-        from app.handlers.payment_handlers import router as payment_router
-        from app.handlers.anon_handlers import router as anon_router
-        from app.handlers.main_handlers import router as main_router
-        from app.handlers.debug_handlers import router as debug_router
+        try:
+            from app.handlers.main_handlers import router as main_router
+            from app.handlers.admin_panel import router as admin_router
+            from app.handlers.payment_handlers import router as payment_router
+            from app.handlers.anon_handlers import router as anon_router
+            from app.handlers.debug_handlers import router as debug_router
+            
+            dp.include_router(main_router)
+            dp.include_router(admin_router)
+            dp.include_router(payment_router)
+            dp.include_router(anon_router)
+            dp.include_router(debug_router)
+            
+            logger.info("✅ Все роутеры зарегистрированы")
+        except Exception as e:
+            logger.error(f"❌ Ошибка регистрации роутеров: {e}")
+            raise
         
-        # Регистрация роутеров
-        dp.include_router(admin_router)
-        dp.include_router(payment_router)
-        dp.include_router(anon_router)
-        dp.include_router(main_router)
-        dp.include_router(debug_router)
-        
-        logger.info("✅ Все роутеры зарегистрированы")
-        
-        # Получаем информацию о боте
+        # 7. Получаем информацию о боте
         bot_info = await bot.get_me()
         logger.info(f"✅ Bot: @{bot_info.username} ({bot_info.first_name})")
         
-        # Отправляем уведомление админам о запуске
+        # 8. Отправляем уведомление админам
         try:
-            # Получаем актуальную информацию о БД
-            try:
-                db_info = db_manager.get_db_info()
-                backup_count = len(db_manager.list_backups())
-            except:
-                db_info = {"size_mb": 0}
-                backup_count = 0
-            
+            from app.database_manager import db_manager
+            db_info = db_manager.get_db_info()
+            backup_count = len(db_manager.list_backups())
+        except:
+            db_info = {"size_mb": 0}
+            backup_count = 0
+        
+        try:
             message = (
-                f"🚀 <b>Бот запущен!</b>\n\n"
+                f"🚀 <b>Бот {'перезапущен' if IS_RENDER else 'запущен'}!</b>\n\n"
                 f"🤖 @{bot_info.username}\n"
                 f"⏰ {datetime.now().strftime('%d.%m.%Y %H:%M')}\n"
                 f"🌐 Render: {'✅ Да' if IS_RENDER else '❌ Нет'}\n"
@@ -143,14 +151,25 @@ async def run_bot():
         except Exception as e:
             logger.error(f"❌ Ошибка отправки уведомления: {e}")
         
-        # Запускаем поллинг
-        await bot.delete_webhook(drop_pending_updates=True)
-        logger.info("🚀 Бот начал работу...")
+        return bot, dp
         
-        # Для Render: также запускаем авто-пинг отдельно
-        if IS_RENDER:
-            logger.info("🌐 Режим Render: авто-пинг включен")
-            
+    except Exception as e:
+        logger.error(f"❌ Критическая ошибка инициализации бота: {e}")
+        import traceback
+        traceback.print_exc()
+        raise
+
+async def run_bot():
+    """Основная функция запуска бота"""
+    try:
+        # Инициализируем бота (один раз)
+        bot, dp = await initialize_bot()
+        
+        # Удаляем вебхук если был
+        await bot.delete_webhook(drop_pending_updates=True)
+        logger.info("🚀 Бот начал работу (поллинг)...")
+        
+        # Запускаем поллинг
         await dp.start_polling(bot)
         
     except Exception as e:
@@ -161,26 +180,29 @@ async def run_bot():
         # Пытаемся уведомить админа об ошибке
         try:
             from app.config import BOT_TOKEN, ADMIN_IDS
+            from aiogram import Bot
+            
             bot = Bot(token=BOT_TOKEN)
             for admin_id in ADMIN_IDS:
                 await bot.send_message(
                     admin_id,
                     f"🚨 <b>Бот упал!</b>\n\n"
                     f"Ошибка: {str(e)[:200]}...\n"
-                    f"Время: {datetime.now().strftime('%H:%M:%S')}\n"
-                    f"💾 Автобэкап создан перед падением",
+                    f"Время: {datetime.now().strftime('%H:%M:%S')}",
                     parse_mode="HTML"
                 )
         except:
             pass
         
-        # Создаем бэкап перед выходом при ошибке
-        try:
-            db_manager.create_backup_on_exit()
-        except:
-            pass
-        
         sys.exit(1)
+
+async def run_bot_async():
+    """
+    Асинхронная версия для запуска из render_server.py
+    ВАЖНО: Эта функция должна вызываться только из одного места
+    """
+    logger.info("🤖 Запуск бота в асинхронном режиме...")
+    await run_bot()
 
 def handle_shutdown(signum, frame):
     """Обработчик завершения работы"""
@@ -188,15 +210,15 @@ def handle_shutdown(signum, frame):
     
     # Создаем бэкап перед выходом
     try:
+        from app.database_manager import db_manager
         db_manager.create_backup_on_exit()
     except Exception as e:
         logger.error(f"❌ Ошибка создания бэкапа при выходе: {e}")
     
     sys.exit(0)
 
-@backup_on_exit  # Декоратор для автоматического бэкапа
 def main():
-    """Точка входа - для запуска бота отдельно"""
+    """Точка входа - для запуска бота отдельно (не из Render)"""
     # Настройка обработчиков сигналов
     signal.signal(signal.SIGINT, handle_shutdown)
     signal.signal(signal.SIGTERM, handle_shutdown)
@@ -207,129 +229,15 @@ def main():
         logger.info("🛑 Бот остановлен пользователем")
         # Создаем бэкап при ручной остановке
         try:
+            from app.database_manager import db_manager
             db_manager.create_backup_on_exit()
         except:
             pass
     except Exception as e:
         logger.error(f"❌ Бот аварийно завершил работу: {e}")
-        try:
-            db_manager.create_backup_on_exit()
-        except:
-            pass
-        sys.exit(1)
-
-async def run_bot_async():
-    """
-    Асинхронная версия для запуска из render_server.py
-    """
-    try:
-        print("🤖 Запуск бота в асинхронном режиме...")
-        
-        # Сначала импортируем ВСЕ модели
-        from app import models  # Это важно!
-        
-        from app.config import BOT_TOKEN, ADMIN_IDS, IS_RENDER
-        from app.database import create_tables
-        
-        # 1. Создаем папки
-        import os
-        os.makedirs('data', exist_ok=True)
-        os.makedirs('backups', exist_ok=True)
-        
-        # 2. Инициализируем менеджер БД
-        print("💾 Инициализация менеджера БД...")
-        try:
-            restored = init_database_manager()
-            if restored:
-                print("✅ БД восстановлена из последнего бэкапа")
-            else:
-                print("✅ Восстановление БД не требовалось")
-        except Exception as e:
-            print(f"⚠️ Ошибка менеджера БД: {e}")
-        
-        # Создаем таблицы - ТЕПЕРЬ модели загружены
-        print("🔄 Создание таблиц БД...")
-        create_tables()
-        print("✅ Таблицы БД созданы")
-        
-        # Проверяем таблицы
-        from sqlalchemy import inspect
-        from app.database import engine
-        inspector = inspect(engine)
-        tables = inspector.get_table_names()
-        print(f"📊 Таблицы в БД: {tables}")
-        
-        # Инициализация бота
-        from aiogram import Bot, Dispatcher
-        from aiogram.fsm.storage.memory import MemoryStorage
-        
-        bot = Bot(token=BOT_TOKEN)
-        dp = Dispatcher(storage=MemoryStorage())
-        
-        # Импорт роутеров
-        from app.handlers.admin_panel import router as admin_router
-        from app.handlers.payment_handlers import router as payment_router
-        from app.handlers.anon_handlers import router as anon_router
-        from app.handlers.main_handlers import router as main_router
-        from app.handlers.debug_handlers import router as debug_router
-        
-        # Регистрация
-        dp.include_router(admin_router)
-        dp.include_router(payment_router)
-        dp.include_router(anon_router)
-        dp.include_router(main_router)
-        dp.include_router(debug_router)
-        
-        print("✅ Все роутеры зарегистрированы")
-        
-        # Получаем информацию о боте
-        bot_info = await bot.get_me()
-        print(f"✅ Bot: @{bot_info.username}")
-        
-        # Уведомление админам о запуске
-        try:
-            try:
-                db_info = db_manager.get_db_info()
-                backup_count = len(db_manager.list_backups())
-            except:
-                db_info = {"size_mb": 0}
-                backup_count = 0
-            
-            message = (
-                f"🚀 <b>Бот запущен на Render!</b>\n\n"
-                f"🤖 @{bot_info.username}\n"
-                f"⏰ {datetime.now().strftime('%d.%m.%Y %H:%M')}\n"
-                f"✅ Авто-пинг включен\n"
-                f"💾 БД: {db_info.get('size_mb', 0):.2f} MB\n"
-                f"📂 Бэкапов: {backup_count}\n"
-                f"📝 /backup - создать бэкап\n"
-                f"📋 /backups - список бэкапов"
-            )
-            
-            for admin_id in ADMIN_IDS:
-                await bot.send_message(admin_id, message, parse_mode="HTML")
-        except Exception as e:
-            print(f"❌ Ошибка уведомления: {e}")
-        
-        # Запуск поллинга
-        await bot.delete_webhook(drop_pending_updates=True)
-        print("🚀 Бот начал работу (поллинг)...")
-        
-        # Запускаем поллинг
-        await dp.start_polling(bot)
-        
-    except Exception as e:
-        print(f"❌ Критическая ошибка в run_bot_async: {e}")
-        
-        # Создаем бэкап перед выходом при ошибке
-        try:
-            db_manager.create_backup_on_exit()
-        except:
-            pass
-        
         import traceback
         traceback.print_exc()
-        raise
+        sys.exit(1)
 
 if __name__ == "__main__":
     main()
