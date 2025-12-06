@@ -54,6 +54,9 @@ class BackupStates(StatesGroup):
 async def cmd_backup(message: Message):
     """Создать бэкап БД"""
     try:
+        # Показываем что начали
+        await message.answer("💾 Создание бэкапа...")
+        
         # Создаем бэкап
         backup_path = db_manager.create_backup()
         
@@ -61,28 +64,29 @@ async def cmd_backup(message: Message):
             backup_name = os.path.basename(backup_path)
             backup_size = os.path.getsize(backup_path) / (1024 * 1024)  # MB
             
-            # Получаем информацию о бэкапах
-            backups = db_manager.list_backups()
-            
             response = (
                 f"✅ <b>Бэкап создан успешно!</b>\n\n"
-                f"📁 Имя: {backup_name}\n"
+                f"📁 Имя: <code>{backup_name}</code>\n"
                 f"📊 Размер: {backup_size:.2f} MB\n"
-                f"📂 Всего бэкапов: {len(backups)}\n"
                 f"⏰ Время: {datetime.now().strftime('%H:%M:%S')}"
             )
             
-            # Отправляем файл пользователю
-            await message.answer_document(
-                FSInputFile(backup_path),
-                caption=response,
-                parse_mode="HTML"
-            )
+            # Пытаемся отправить файл
+            try:
+                await message.answer_document(
+                    FSInputFile(backup_path),
+                    caption=response,
+                    parse_mode="HTML"
+                )
+            except:
+                # Если не получилось отправить файл, отправляем только сообщение
+                await message.answer(response, parse_mode="HTML")
         else:
-            await message.answer("❌ Не удалось создать бэкап")
+            await message.answer("❌ Не удалось создать бэкап. Проверьте логи.")
             
     except Exception as e:
-        await message.answer(f"❌ Ошибка при создании бэкапа: {str(e)}")
+        error_msg = str(e)[:200]  # Ограничиваем длину сообщения
+        await message.answer(f"❌ Ошибка при создании бэкапа: {error_msg}")
 
 @router.message(Command("backups"), admin_filter)
 async def cmd_backups(message: Message):
