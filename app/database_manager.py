@@ -94,31 +94,56 @@ class DatabaseManager:
             return None
     
     def create_backup(self, backup_name: Optional[str] = None) -> Optional[str]:
-        """Создать резервную копию базы данных"""
+    """Создать резервную копию базы данных"""
+    try:
+        # Проверяем существует ли файл БД
         if not os.path.exists(self.db_path):
-            logger.warning(f"⚠️ Файл БД не найден: {self.db_path}")
-            return None
+            # Пытаемся найти БД в другом месте
+            possible_paths = [
+                self.db_path,
+                'bot.db',
+                './bot.db',
+                os.path.join(os.getcwd(), 'bot.db'),
+                os.path.join(os.getcwd(), 'data', 'bot.db')
+            ]
+            
+            for path in possible_paths:
+                if os.path.exists(path):
+                    self.db_path = path
+                    logger.info(f"🔍 Найдена БД по пути: {path}")
+                    break
+            else:
+                logger.error(f"❌ Файл БД не найден по путям: {possible_paths}")
+                return None
         
-        try:
-            # Генерируем имя файла
-            if backup_name is None:
-                timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
-                backup_name = f"backup_{timestamp}.db"
-            
-            backup_path = os.path.join(self.backup_dir, backup_name)
-            
-            # Создаем бэкап
-            shutil.copy2(self.db_path, backup_path)
+        # Генерируем имя файла
+        if backup_name is None:
+            timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+            backup_name = f"backup_{timestamp}.db"
+        
+        backup_path = os.path.join(self.backup_dir, backup_name)
+        
+        # Создаем бэкап
+        shutil.copy2(self.db_path, backup_path)
+        
+        # Проверяем что файл создался
+        if os.path.exists(backup_path):
+            file_size = os.path.getsize(backup_path)
+            logger.info(f"✅ Бэкап создан: {backup_name} ({file_size} байт)")
             
             # Сохраняем метаданные
             self.save_metadata()
             
-            logger.info(f"✅ Бэкап создан: {backup_name}")
             return backup_path
-            
-        except Exception as e:
-            logger.error(f"❌ Ошибка создания бэкапа: {e}")
+        else:
+            logger.error(f"❌ Файл бэкапа не создался: {backup_path}")
             return None
+            
+    except Exception as e:
+        logger.error(f"❌ Ошибка создания бэкапа: {e}")
+        import traceback
+        traceback.print_exc()
+        return None
     
     def create_backup_on_exit(self):
         """Создать бэкап при выходе из приложения"""
