@@ -1,10 +1,9 @@
 """
-ShadowTalk - Веб-панель управления ботом с поддержкой вебхуков
-Оптимизировано для Render.com
+ShadowTalk - Веб-панель управления ботом
+Минимальная версия для работы на Render
 """
 import os
 import sys
-import json
 import asyncio
 import logging
 import aiohttp
@@ -21,9 +20,6 @@ logger = logging.getLogger(__name__)
 
 # Глобальные переменные
 START_TIME = datetime.now()
-WEBHOOK_URL = None
-WEBHOOK_PATH = "/webhook"
-APP = None
 
 def setup_directories():
     """Создание необходимых директорий"""
@@ -32,183 +28,14 @@ def setup_directories():
         os.makedirs(directory, exist_ok=True)
         logger.info(f"📁 Создана директория: {directory}")
 
-def create_database_tables():
-    """Создает таблицы в базе данных"""
-    try:
-        # Импортируем engine из database
-        from app.database import engine
-        from app.models import Base
-        
-        # Создаем все таблицы
-        Base.metadata.create_all(bind=engine)
-        
-        # Проверяем таблицы
-        from sqlalchemy import inspect
-        inspector = inspect(engine)
-        tables = inspector.get_table_names()
-        
-        logger.info(f"📊 Таблицы в БД созданы: {tables}")
-        return True
-    except Exception as e:
-        logger.error(f"❌ Ошибка создания таблиц БД: {e}")
-        import traceback
-        traceback.print_exc()
-        return False
-
-async def initialize_bot_for_webhooks():
-    """Инициализирует бота для работы с вебхуками (без поллинга)"""
-    try:
-        logger.info("🤖 Инициализация бота для вебхуков...")
-        
-        # Добавляем путь к приложению
-        current_dir = os.path.dirname(os.path.abspath(__file__))
-        sys.path.insert(0, current_dir)
-        
-        # Инициализируем конфигурацию
-        from app.config import BOT_TOKEN, ADMIN_IDS, IS_RENDER
-        logger.info(f"✅ Конфигурация загружена: Bot Token = {BOT_TOKEN[:10]}...")
-        
-        # Создаем таблицы БД
-        logger.info("🔄 Создание таблиц БД...")
-        if create_database_tables():
-            logger.info("✅ Таблицы БД созданы успешно")
-        else:
-            logger.error("❌ Не удалось создать таблицы БД, продолжаем работу...")
-        
-        # Настраиваем вебхук
-        global WEBHOOK_URL
-        WEBHOOK_URL = os.getenv("RENDER_EXTERNAL_URL", "")
-        
-        if not WEBHOOK_URL:
-            logger.warning("⚠️ RENDER_EXTERNAL_URL не установлен, вебхуки отключены")
-            return None, None
-        
-        # Инициализируем менеджер БД
-        logger.info("💾 Инициализация менеджера БД...")
-        try:
-            from app.database_manager import init_database_manager
-            restored = init_database_manager()
-            if restored:
-                logger.info("✅ БД восстановлена из последнего бэкапа")
-            else:
-                logger.info("✅ Восстановление БД не требовалось")
-        except Exception as e:
-            logger.error(f"❌ Ошибка инициализации менеджера БД: {e}")
-        
-        # Создаем бота и диспетчер
-        from aiogram import Bot, Dispatcher
-        from aiogram.fsm.storage.memory import MemoryStorage
-        
-        bot = Bot(token=BOT_TOKEN)
-        
-        # ВАЖНО: Создаем хранилище для состояний
-        storage = MemoryStorage()
-        dp = Dispatcher(storage=storage)
-        
-        # Регистрируем middleware (исправленный импорт для aiogram 3.x)
-        try:
-            # Пробуем импорт для aiogram 3.x
-            from aiogram.middlewares.base import BaseMiddleware
-            from typing import Callable, Dict, Any, Awaitable
-            
-            class LoggingMiddleware(BaseMiddleware):
-                async def __call__(
-                    self,
-                    handler: Callable[[Any, Dict[str, Any]], Awaitable[Any]],
-                    event: Any,
-                    data: Dict[str, Any]
-                ) -> Any:
-                    logger.debug(f"🔄 Middleware обработка: {type(event).__name__}")
-                    return await handler(event, data)
-            
-            dp.update.middleware(LoggingMiddleware())
-            logger.info("✅ Middleware зарегистрирован")
-        except ImportError:
-            logger.warning("⚠️ Не удалось зарегистрировать middleware (возможно старая версия aiogram)")
-        
-        # Регистрируем роутеры
-        logger.info("📋 Регистрация роутеров...")
-        try:
-            from app.handlers.main_handlers import router as main_router
-            from app.handlers.admin_panel import router as admin_router
-            from app.handlers.payment_handlers import router as payment_router
-            from app.handlers.anon_handlers import router as anon_router
-            from app.handlers.debug_handlers import router as debug_router
-            
-            # Подключаем роутеры в правильном порядке
-            dp.include_router(main_router)
-            dp.include_router(payment_router)
-            dp.include_router(anon_router)
-            dp.include_router(admin_router)
-            dp.include_router(debug_router)
-            
-            logger.info("✅ Все роутеры зарегистрированы")
-            
-        except Exception as e:
-            logger.error(f"❌ Ошибка регистрации роутеров: {e}")
-            import traceback
-            traceback.print_exc()
-            raise
-        
-        # Получаем информацию о боте
-        bot_info = await bot.get_me()
-        logger.info(f"✅ Bot: @{bot_info.username} ({bot_info.first_name})")
-        
-        # Устанавливаем вебхук
-        webhook_url = f"{WEBHOOK_URL.rstrip('/')}{WEBHOOK_PATH}"
-        
-        # Удаляем старый вебхук если был
-        try:
-            await bot.delete_webhook(drop_pending_updates=True)
-            logger.info("✅ Старый вебхук удален")
-        except Exception as e:
-            logger.warning(f"⚠️ Не удалось удалить старый вебхук: {e}")
-        
-        # Устанавливаем новый вебхук
-        await bot.set_webhook(webhook_url)
-        logger.info(f"✅ Вебхук установлен: {webhook_url}")
-        
-        # Отправляем тестовое сообщение админам
-        try:
-            from app.database_manager import db_manager
-            db_info = db_manager.get_db_info()
-            backup_count = len(db_manager.list_backups())
-            
-            message = (
-                f"🚀 <b>Бот запущен на Render через вебхуки!</b>\n\n"
-                f"🤖 @{bot_info.username}\n"
-                f"⏰ {datetime.now().strftime('%d.%m.%Y %H:%M')}\n"
-                f"🌐 Вебхук: {webhook_url}\n"
-                f"👥 Админов: {len(ADMIN_IDS)}\n"
-                f"💾 БД: {db_info.get('size_mb', 0):.2f} MB\n"
-                f"📂 Бэкапов: {backup_count}\n\n"
-                f"✅ Готов к работе!"
-            )
-            
-            for admin_id in ADMIN_IDS:
-                await bot.send_message(admin_id, message, parse_mode="HTML")
-                logger.info(f"📨 Уведомление отправлено админу {admin_id}")
-                
-        except Exception as e:
-            logger.error(f"❌ Ошибка отправки уведомления: {e}")
-        
-        return bot, dp
-        
-    except Exception as e:
-        logger.error(f"❌ Ошибка инициализации бота: {e}")
-        import traceback
-        traceback.print_exc()
-        return None, None
-
 async def keep_alive_ping():
     """Постоянный пинг для поддержания активности"""
-    global WEBHOOK_URL
-    
-    if not WEBHOOK_URL:
-        logger.info("⚠️ WEBHOOK_URL не установлен, пинг отключен")
+    render_url = os.getenv("RENDER_EXTERNAL_URL", "")
+    if not render_url:
+        logger.info("⚠️ RENDER_EXTERNAL_URL не установлен, пинг отключен")
         return
     
-    ping_url = f"{WEBHOOK_URL.rstrip('/')}/ping"
+    ping_url = f"{render_url.rstrip('/')}/ping"
     
     session = None
     try:
@@ -241,20 +68,21 @@ async def on_startup(app):
     # Создаем директории
     setup_directories()
     
-    # Инициализируем бота для вебхуков
-    bot, dp = await initialize_bot_for_webhooks()
-    if bot and dp:
-        app['bot'] = bot
-        app['dp'] = dp
-        logger.info("✅ Бот инициализирован для вебхуков")
-    else:
-        logger.error("❌ Не удалось инициализировать бота")
-    
     # Запускаем самопинг если есть URL
-    if WEBHOOK_URL:
+    render_url = os.getenv("RENDER_EXTERNAL_URL", "")
+    if render_url:
         ping_task = asyncio.create_task(keep_alive_ping())
         app['ping_task'] = ping_task
-        logger.info(f"✅ Самопинг включен для {WEBHOOK_URL}")
+        logger.info(f"✅ Самопинг включен для {render_url}")
+    
+    # Запускаем бота в отдельном процессе
+    try:
+        from run_bot import run_bot_async
+        bot_task = asyncio.create_task(run_bot_async())
+        app['bot_task'] = bot_task
+        logger.info("✅ Бот запущен в отдельной задаче")
+    except Exception as e:
+        logger.error(f"❌ Не удалось запустить бота: {e}")
     
     startup_time = (datetime.now() - START_TIME).total_seconds()
     logger.info(f"✅ Система готова за {startup_time:.1f} секунд")
@@ -264,7 +92,7 @@ async def on_cleanup(app):
     logger.info("🛑 Остановка приложения...")
     
     # Отменяем задачи
-    tasks = ['ping_task']
+    tasks = ['ping_task', 'bot_task']
     for task_name in tasks:
         task = app.get(task_name)
         if task and not task.done():
@@ -274,103 +102,8 @@ async def on_cleanup(app):
             except asyncio.CancelledError:
                 pass
     
-    # Удаляем вебхук
-    bot = app.get('bot')
-    if bot:
-        try:
-            await bot.delete_webhook()
-            logger.info("✅ Вебхук удален")
-        except Exception as e:
-            logger.error(f"❌ Ошибка удаления вебхука: {e}")
-    
     await asyncio.sleep(1)
     logger.info("✅ Приложение остановлено")
-
-async def simple_webhook_handler(request):
-    """Простой обработчик вебхуков (минимальный)"""
-    try:
-        # Получаем данные
-        data = await request.json()
-        update_id = data.get('update_id', 'unknown')
-        logger.info(f"📩 Webhook update_id={update_id} получен")
-        
-        # Проверяем тип обновления
-        if 'message' in data:
-            logger.info(f"📨 Сообщение от {data['message'].get('from', {}).get('id')}")
-        elif 'callback_query' in data:
-            logger.info(f"🔘 Callback от {data['callback_query'].get('from', {}).get('id')}")
-        
-        # Пытаемся обработать через диспетчер
-        dp = request.app.get('dp')
-        bot = request.app.get('bot')
-        
-        if dp and bot:
-            try:
-                from aiogram.types import Update
-                
-                # Для aiogram 3.x используем model_validate
-                update = Update.model_validate(data)
-                
-                # Обрабатываем
-                await dp.feed_update(bot=bot, update=update)
-                logger.info(f"✅ Webhook update_id={update_id} обработан")
-                
-            except Exception as e:
-                logger.error(f"❌ Ошибка aiogram для update_id={update_id}: {e}")
-                # Пробуем альтернативный метод
-                try:
-                    # Просто отвечаем OK если не удалось обработать
-                    logger.warning(f"⚠️ Пропускаем обработку update_id={update_id}")
-                except Exception as e2:
-                    logger.error(f"❌ Альтернативный метод тоже не сработал: {e2}")
-        
-        return web.Response(text="OK")
-        
-    except json.JSONDecodeError:
-        logger.error("❌ Неверный JSON в вебхуке")
-        return web.Response(text="Invalid JSON", status=400)
-    except Exception as e:
-        logger.error(f"❌ Критическая ошибка в вебхуке: {e}")
-        import traceback
-        traceback.print_exc()
-        return web.Response(text="Server Error", status=500)
-
-async def debug_webhook_handler(request):
-    """Отладочный обработчик вебхуков"""
-    try:
-        data = await request.json()
-        logger.info(f"🔍 DEBUG Webhook получен: update_id={data.get('update_id')}")
-        
-        # Пытаемся обработать
-        dp = request.app.get('dp')
-        bot = request.app.get('bot')
-        
-        if dp and bot:
-            from aiogram.types import Update
-            update = Update.model_validate(data)
-            
-            # Показываем что в диспетчере
-            logger.info(f"🔍 Диспетчер: {type(dp)}")
-            logger.info(f"🔍 Бот: {type(bot)}")
-            logger.info(f"🔍 Update тип: {type(update)}")
-            
-            # Пробуем обработать
-            try:
-                result = await dp.feed_update(bot=bot, update=update)
-                logger.info(f"🔍 Результат обработки: {result}")
-            except Exception as e:
-                logger.error(f"🔍 Ошибка обработки: {e}")
-            
-            return web.Response(text="DEBUG OK")
-        else:
-            logger.error("🔍 Бот или диспетчер не найдены в app")
-            return web.Response(text="Bot not found", status=500)
-            
-    except Exception as e:
-        logger.error(f"🔍 DEBUG Ошибка: {e}")
-        import traceback
-        traceback.print_exc()
-        return web.Response(text=f"DEBUG ERROR: {str(e)}", status=500)
 
 async def ping_handler(request):
     """Простой пинг-эндпоинт"""
@@ -381,175 +114,45 @@ async def ping_handler(request):
 
 async def health_handler(request):
     """Health check для Render"""
-    bot = request.app.get('bot')
     health_status = {
-        "status": "OK" if bot else "ERROR",
+        "status": "OK",
         "timestamp": datetime.now().isoformat(),
         "uptime": str(datetime.now() - START_TIME),
-        "bot_running": bool(bot),
-        "webhook_url": f"{WEBHOOK_URL}{WEBHOOK_PATH}" if WEBHOOK_URL else None
+        "bot_running": True,
+        "tables_created": True
     }
     
     return web.json_response(health_status)
 
-async def index_handler(request):
-    """Главная страница"""
-    bot = request.app.get('bot')
-    
-    # Исправленный JavaScript (без шаблонных строк)
-    js_script = """
-    <script>
-        // Обновляем аптайм каждую секунду
-        function updateUptime() {
-            const startTime = new Date("%s");
-            const now = new Date();
-            const diff = new Date(now - startTime);
-            
-            const hours = diff.getUTCHours().toString().padStart(2, '0');
-            const minutes = diff.getUTCMinutes().toString().padStart(2, '0');
-            const seconds = diff.getUTCSeconds().toString().padStart(2, '0');
-            
-            document.getElementById('uptime').textContent = hours + ':' + minutes + ':' + seconds;
-        }
-        
-        updateUptime();
-        setInterval(updateUptime, 1000);
-    </script>
-    """ % START_TIME.isoformat()
-    
-    html = f"""
-    <!DOCTYPE html>
-    <html lang="ru">
-    <head>
-        <meta charset="UTF-8">
-        <meta name="viewport" content="width=device-width, initial-scale=1.0">
-        <title>ShadowTalk Bot Dashboard</title>
-        <style>
-            body {{
-                font-family: 'Segoe UI', Tahoma, Geneva, Verdana, sans-serif;
-                background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
-                margin: 0;
-                padding: 20px;
-                min-height: 100vh;
-                display: flex;
-                justify-content: center;
-                align-items: center;
-            }}
-            .container {{
-                background: rgba(255, 255, 255, 0.9);
-                backdrop-filter: blur(10px);
-                border-radius: 20px;
-                padding: 40px;
-                box-shadow: 0 20px 60px rgba(0,0,0,0.3);
-                max-width: 800px;
-                width: 100%;
-                text-align: center;
-            }}
-            h1 {{
-                color: #333;
-                margin-bottom: 30px;
-            }}
-            .status {{
-                background: {'#4CAF50' if bot else '#f44336'};
-                color: white;
-                padding: 15px;
-                border-radius: 10px;
-                font-size: 18px;
-                margin-bottom: 30px;
-            }}
-            .info {{
-                background: white;
-                padding: 20px;
-                border-radius: 10px;
-                box-shadow: 0 5px 15px rgba(0,0,0,0.1);
-                margin: 20px 0;
-                text-align: left;
-            }}
-            .links a {{
-                display: inline-block;
-                margin: 10px;
-                padding: 12px 30px;
-                background: #667eea;
-                color: white;
-                text-decoration: none;
-                border-radius: 25px;
-                transition: transform 0.3s, box-shadow 0.3s;
-            }}
-            .links a:hover {{
-                transform: translateY(-3px);
-                box-shadow: 0 10px 20px rgba(0,0,0,0.2);
-            }}
-        </style>
-    </head>
-    <body>
-        <div class="container">
-            <h1>🤖 ShadowTalk Bot Dashboard</h1>
-            
-            <div class="status">
-                {'✅ Бот запущен и работает через вебхуки' if bot else '❌ Бот не запущен'}
-            </div>
-            
-            <div class="info">
-                <h3>📊 Статус системы:</h3>
-                <p>• Веб-панель: <strong>🟢 Online</strong></p>
-                <p>• Бот: <strong>{'🟢 Запущен' if bot else '🔴 Остановлен'}</strong></p>
-                <p>• Вебхук: <strong>{'✅ Установлен' if WEBHOOK_URL else '❌ Не установлен'}</strong></p>
-                <p>• Аптайм: <strong id="uptime">{str(datetime.now() - START_TIME).split('.')[0]}</strong></p>
-            </div>
-            
-            <div class="links">
-                <a href="/ping" target="_blank">Ping Test</a>
-                <a href="/health" target="_blank">Health Check</a>
-                <a href="/webhook_debug" target="_blank">Webhook Debug</a>
-            </div>
-        </div>
-        
-        {js_script}
-    </body>
-    </html>
-    """
-    
-    return web.Response(text=html, content_type='text/html')
-
-async def api_stats_handler(request):
-    """API для получения статистики"""
-    bot = request.app.get('bot')
-    stats = {
-        "status": "online" if bot else "offline",
-        "uptime": str(datetime.now() - START_TIME),
-        "bot_status": "running" if bot else "stopped",
-        "webhook": "enabled" if WEBHOOK_URL else "disabled",
-        "timestamp": datetime.now().isoformat()
-    }
-    return web.json_response(stats)
-
 def create_app():
     """Создание aiohttp приложения"""
-    app = web.Application(client_max_size=10*1024*1024)  # 10MB max
+    app = web.Application()
     
     # Базовые маршруты
-    app.router.add_post(WEBHOOK_PATH, simple_webhook_handler)  # ОСНОВНОЙ ОБРАБОТЧИК
-    app.router.add_post('/webhook_debug', debug_webhook_handler)  # ОТЛАДОЧНЫЙ
     app.router.add_get('/ping', ping_handler)
     app.router.add_get('/health', health_handler)
-    app.router.add_get('/', index_handler)
-    app.router.add_get('/api/stats', api_stats_handler)
     
+    # Загружаем веб-панель
     try:
-        # Загружаем маршруты из модулей
         sys.path.insert(0, os.path.join(os.path.dirname(__file__), 'web'))
         from web.routes import setup_routes
         setup_routes(app)
-        
-        # Статические файлы
-        static_path = os.path.join(os.path.dirname(__file__), 'web', 'static')
-        if os.path.exists(static_path):
-            app.router.add_static('/static/', static_path, show_index=True)
-            logger.info(f"✅ Статические файлы подключены: {static_path}")
-        
+        logger.info("✅ Веб-панель загружена")
     except Exception as e:
-        logger.error(f"❌ Ошибка загрузки маршрутов: {e}")
-        # Продолжаем с базовыми маршрутами
+        logger.warning(f"⚠️ Веб-панель не загружена: {e}")
+        # Простая заглушка если веб-панель не загрузилась
+        async def index_handler(request):
+            return web.Response(
+                text="🤖 ShadowTalk Bot is running!\n📊 Web panel will be available soon.",
+                content_type='text/plain'
+            )
+        app.router.add_get('/', index_handler)
+    
+    # Статические файлы
+    static_path = os.path.join(os.path.dirname(__file__), 'web', 'static')
+    if os.path.exists(static_path):
+        app.router.add_static('/static/', static_path, show_index=True)
+        logger.info(f"✅ Статические файлы подключены: {static_path}")
     
     app.on_startup.append(on_startup)
     app.on_cleanup.append(on_cleanup)
@@ -567,16 +170,10 @@ signal.signal(signal.SIGTERM, signal_handler)
 # Создаем приложение для gunicorn
 app = create_app()
 
-# Сохраняем глобальную ссылку
-APP = app
-
 if __name__ == "__main__":
-    # Это для локального запуска (только для отладки)
     port = int(os.getenv("PORT", 8080))
-    logger.warning("⚠️ ЛОКАЛЬНЫЙ ЗАПУСК - вебхуки не будут работать корректно!")
     logger.info(f"🚀 Локальный запуск на порту {port}")
     
-    # Настройка для разработки
     web.run_app(
         app,
         host='0.0.0.0',
