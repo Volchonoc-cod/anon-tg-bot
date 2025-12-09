@@ -75,6 +75,9 @@ async def backups_handler(request):
                     <button class="btn btn-danger" onclick="sendCurrentDbToAdmins()">
                         <i class="fas fa-share-alt"></i> Отправить текущую БД
                     </button>
+                    <button class="btn btn-primary" onclick="restartBot()" style="background: linear-gradient(135deg, var(--primary) 0%, #4f46e5 100%);">
+                        <i class="fas fa-sync-alt"></i> Перезапустить бота
+                    </button>
                 </div>
             </div>
             
@@ -182,6 +185,7 @@ async def backups_handler(request):
                 <p>• Все бэкапы валидируются на корректность структуры</p>
                 <p>• Загруженные БД проверяются на валидность перед восстановлением</p>
                 <p>• Возможность отправки БД админам прямо из веб-панели</p>
+                <p>• После восстановления БД рекомендуется перезапустить бота кнопкой выше</p>
             </div>
             
             <!-- Модальное окно для информации о бэкапе -->
@@ -282,14 +286,22 @@ async def backups_handler(request):
         }}
         
         function restoreBackup(filename) {{
-            if (confirm(`Восстановить БД из бэкапа ${{filename}}?\\n\\nТекущая БД будет заменена!\\n⚠️ ПЕРЕЗАПУСТИТЕ БОТА ПОСЛЕ ЭТОГО!`)) {{
+            if (confirm(`Восстановить БД из бэкапа ${{filename}}?\\n\\nТекущая БД будет заменена!\\n⚠️ После восстановления рекомендуется перезапустить бота!`)) {{
                 showLoading('Восстановление БД...');
                 fetch(`/api/restore_backup?file=${{encodeURIComponent(filename)}}`)
                     .then(response => response.json())
                     .then(data => {{
                         hideLoading();
                         if (data.success) {{
-                            alert('✅ ' + data.message + '\\n⚠️ ПЕРЕЗАПУСТИТЕ БОТА ДЛЯ ПРИМЕНЕНИЯ ИЗМЕНЕНИЙ!');
+                            const message = data.requires_restart 
+                                ? '✅ ' + data.message + '\\n⚠️ РЕКОМЕНДУЕТСЯ ПЕРЕЗАПУСТИТЬ БОТА!\\n\\nХотите перезапустить бота сейчас?'
+                                : '✅ ' + data.message;
+                            
+                            if (data.requires_restart && confirm(message)) {{
+                                restartBot();
+                            }} else {{
+                                alert('✅ ' + data.message);
+                            }}
                         }} else {{
                             alert('❌ Ошибка: ' + data.error);
                         }}
@@ -378,6 +390,32 @@ async def backups_handler(request):
                 }});
         }}
         
+        function restartBot() {{
+            if (confirm('Перезапустить бота?\\n\\nБот будет остановлен и запущен заново.\\nЭто может занять 10-20 секунд.')) {{
+                showLoading('Перезапуск бота... Это может занять некоторое время');
+                fetch('/api/restart_bot')
+                    .then(response => response.json())
+                    .then(data => {{
+                        hideLoading();
+                        if (data.success) {{
+                            const beforeStatus = data.status_before.status;
+                            const afterStatus = data.status_after.status;
+                            const message = `✅ Бот перезапущен успешно!\\n\\nСтатус до: ${{beforeStatus}}\\nСтатус после: ${{afterStatus}}`;
+                            
+                            alert(message);
+                            // Обновляем страницу через 3 секунды
+                            setTimeout(() => location.reload(), 3000);
+                        }} else {{
+                            alert('❌ Ошибка: ' + data.error);
+                        }}
+                    }})
+                    .catch(error => {{
+                        hideLoading();
+                        alert('❌ Ошибка сети: ' + error);
+                    }});
+            }}
+        }}
+        
         function showUploadForm() {{
             document.getElementById('uploadForm').style.display = 'block';
         }}
@@ -400,15 +438,19 @@ async def backups_handler(request):
         }}
         
         function showLoading(message) {{
-            // Простая реализация загрузки
-            const loadingEl = document.getElementById('loadingOverlay') || createLoadingOverlay();
+            let loadingEl = document.getElementById('loadingOverlay');
+            if (!loadingEl) {{
+                loadingEl = createLoadingOverlay();
+            }}
             loadingEl.style.display = 'flex';
             loadingEl.querySelector('.loading-text').textContent = message;
         }}
         
         function hideLoading() {{
             const loadingEl = document.getElementById('loadingOverlay');
-            if (loadingEl) loadingEl.style.display = 'none';
+            if (loadingEl) {{
+                loadingEl.style.display = 'none';
+            }}
         }}
         
         function createLoadingOverlay() {{
@@ -439,18 +481,22 @@ async def backups_handler(request):
                     animation: spin 1s linear infinite;
                     margin-bottom: 15px;
                 "></div>
-                <div class="loading-text"></div>
+                <div class="loading-text" style="text-align: center; max-width: 80%;"></div>
             `;
             document.body.appendChild(div);
             
-            const style = document.createElement('style');
-            style.textContent = `
-                @keyframes spin {{
-                    0% {{ transform: rotate(0deg); }}
-                    100% {{ transform: rotate(360deg); }}
-                }}
-            `;
-            document.head.appendChild(style);
+            // Добавляем стили для анимации
+            if (!document.getElementById('loadingStyles')) {{
+                const style = document.createElement('style');
+                style.id = 'loadingStyles';
+                style.textContent = `
+                    @keyframes spin {{
+                        0% {{ transform: rotate(0deg); }}
+                        100% {{ transform: rotate(360deg); }}
+                    }}
+                `;
+                document.head.appendChild(style);
+            }}
             
             return div;
         }}
@@ -483,9 +529,19 @@ async def backups_handler(request):
                 if (result.success) {{
                     progressBar.style.width = '100%';
                     uploadStatus.textContent = '✅ ' + result.message;
-                    setTimeout(() => {{
-                        location.reload();
-                    }}, 2000);
+                    
+                    if (result.requires_restart) {{
+                        setTimeout(() => {{
+                            const restartConfirm = confirm('✅ БД успешно загружена!\\n\\nТребуется перезапуск бота для применения изменений.\\n\\nПерезапустить бота сейчас?');
+                            if (restartConfirm) {{
+                                restartBot();
+                            }} else {{
+                                location.reload();
+                            }}
+                        }}, 1000);
+                    }} else {{
+                        setTimeout(() => location.reload(), 2000);
+                    }}
                 }} else {{
                     uploadStatus.textContent = '❌ ' + result.error;
                     progressBar.style.width = '100%';
