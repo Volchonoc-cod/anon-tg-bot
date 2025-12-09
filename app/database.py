@@ -1,8 +1,10 @@
 import os
 from sqlalchemy import create_engine
-from sqlalchemy.ext.declarative import declarative_base
 from sqlalchemy.orm import sessionmaker
-from .models import Base
+import logging
+
+logger = logging.getLogger(__name__)
+
 # Путь к базе данных в папке data
 BASE_DIR = os.path.dirname(os.path.abspath(__file__))
 DATA_DIR = os.path.join(BASE_DIR, 'data')
@@ -19,7 +21,6 @@ engine = create_engine(
     connect_args={"check_same_thread": False} if "sqlite" in DATABASE_URL else {}
 )
 SessionLocal = sessionmaker(autocommit=False, autoflush=False, bind=engine)
-Base = declarative_base()
 
 def get_db():
     db = SessionLocal()
@@ -29,11 +30,10 @@ def get_db():
         db.close()
 
 def create_tables():
-    Base.metadata.create_all(bind=engine)
-
-def create_tables():
     """Создает все таблицы в базе данных"""
     try:
+        # Импортируем здесь, чтобы избежать циклического импорта
+        from .models import Base
         Base.metadata.create_all(bind=engine)
         logger.info("✅ Таблицы БД созданы/проверены")
         return True
