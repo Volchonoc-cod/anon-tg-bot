@@ -65,6 +65,10 @@ async def initialize_bot():
         logger.info(f"✅ Конфигурация загружена: Bot Token = {BOT_TOKEN[:10]}...")
         logger.info(f"✅ Админы: {ADMIN_IDS}")
         
+        # Создаем бота сразу, чтобы передать его в менеджер БД
+        from aiogram import Bot
+        bot = Bot(token=BOT_TOKEN)
+        
         # Создаем таблицы БД
         logger.info("🔄 Создание таблиц БД...")
         if create_database_tables():
@@ -72,20 +76,19 @@ async def initialize_bot():
         else:
             logger.error("❌ Не удалось создать таблицы БД")
         
-        # Инициализируем менеджер БД
+        # Инициализируем менеджер БД с ботом
         logger.info("💾 Инициализация менеджера БД...")
         try:
             from app.database_manager import init_database_manager
-            init_database_manager()
-            logger.info("✅ Менеджер БД инициализирован")
+            init_database_manager(bot)  # Передаем бота для отправки уведомлений
+            logger.info("✅ Менеджер БД инициализирован с ботом")
         except Exception as e:
             logger.error(f"❌ Ошибка инициализации менеджера БД: {e}")
         
-        # Создаем бота и диспетчер
-        from aiogram import Bot, Dispatcher
+        # Создаем диспетчер
+        from aiogram import Dispatcher
         from aiogram.fsm.storage.memory import MemoryStorage
         
-        bot = Bot(token=BOT_TOKEN)
         storage = MemoryStorage()
         dp = Dispatcher(storage=storage)
         
