@@ -10,6 +10,7 @@ import aiohttp
 from aiohttp import web
 from datetime import datetime
 import signal
+import subprocess
 
 # Настройка логирования
 logging.basicConfig(
@@ -23,7 +24,7 @@ START_TIME = datetime.now()
 
 def setup_directories():
     """Создание необходимых директорий"""
-    directories = ['data', 'backups', 'logs']
+    directories = ['data', 'backups', 'logs', 'uploads']
     for directory in directories:
         os.makedirs(directory, exist_ok=True)
         logger.info(f"📁 Создана директория: {directory}")
@@ -67,7 +68,24 @@ async def on_startup(app):
     
     # Создаем директории
     setup_directories()
-    
+
+    logger.info("🔍 Проверка и восстановление БД...")
+    try:
+        result = subprocess.run(
+            [sys.executable, "auto_restore.py"],
+            capture_output=True,
+            text=True,
+            timeout=30
+        )
+        
+        if result.returncode == 0:
+            logger.info("✅ Автовосстановление БД успешно")
+        else:
+            logger.warning(f"⚠️ Автовосстановление БД: {result.stderr}")
+            
+    except Exception as e:
+        logger.error(f"❌ Ошибка автовосстановления: {e}")
+
     # Запускаем самопинг если есть URL
     render_url = os.getenv("RENDER_EXTERNAL_URL", "")
     if render_url:
