@@ -1,5 +1,5 @@
 """
-API эндпоинты для веб-панели
+API эндпоинты для веб-панели - ИСПРАВЛЕННАЯ ВЕРСИЯ
 """
 from aiohttp import web
 import json
@@ -530,7 +530,7 @@ async def api_get_backup_info(request):
         }, status=500)
 
 async def api_get_db_detailed_info(request):
-    """API для получения детальной информации о текущей БД"""
+    """API для получения детальной информации о текущей БД - ИСПРАВЛЕНА"""
     try:
         db_info = db_manager.get_db_info()
         db_path = db_manager.db_path
@@ -586,6 +586,9 @@ async def api_get_db_detailed_info(request):
         # Проверяем статус бота
         bot_status = await check_bot_status()
         
+        # ИСПРАВЛЕНО: правильное форматирование числа
+        revenue_formatted = f"{total_revenue / 100:.2f} ₽" if total_revenue else "0.00 ₽"
+        
         html = f'''
         <div style="display: grid; grid-template-columns: repeat(2, 1fr); gap: 20px; margin-bottom: 30px;">
             <div style="background: rgba(99, 102, 241, 0.1); padding: 20px; border-radius: 15px;">
@@ -610,18 +613,21 @@ async def api_get_db_detailed_info(request):
         </div>
         
         <!-- Статус бота -->
-        <div style="background: { 'rgba(16, 185, 129, 0.1)' if bot_status.get('status') == 'running' else 'rgba(239, 68, 68, 0.1)' }; padding: 20px; border-radius: 15px; margin-bottom: 20px;">
-            <h4 style="color: { 'var(--success)' if bot_status.get('status') == 'running' else 'var(--danger)' }; margin-bottom: 15px;">
+        <div style="background: {'rgba(16, 185, 129, 0.1)' if bot_status.get('status') == 'running' else 'rgba(239, 68, 68, 0.1)'}; padding: 20px; border-radius: 15px; margin-bottom: 20px;">
+            <h4 style="color: {'var(--success)' if bot_status.get('status') == 'running' else 'var(--danger)'}; margin-bottom: 15px;">
                 <i class="fas fa-robot"></i> Статус бота: {'✅ Запущен' if bot_status.get('status') == 'running' else '❌ Остановлен'}
             </h4>
             <div style="display: grid; grid-template-columns: repeat(2, 1fr); gap: 15px;">
                 <div>
                     <div style="font-weight: 600; color: var(--gray);">Статус:</div>
-                    <div style="font-size: 1.2em; font-weight: 600; color: { 'var(--success)' if bot_status.get('status') == 'running' else 'var(--danger)' };">
+                    <div style="font-size: 1.2em; font-weight: 600; color: {'var(--success)' if bot_status.get('status') == 'running' else 'var(--danger)'};">
                         {bot_status.get('status', 'unknown')}
                     </div>
                 </div>
-                {f'''
+        '''
+        
+        if bot_status.get('status') == 'running':
+            html += f'''
                 <div>
                     <div style="font-weight: 600; color: var(--gray);">PID:</div>
                     <div style="font-size: 1.2em; font-weight: 600;">{bot_status.get('pid', 'N/A')}</div>
@@ -634,7 +640,9 @@ async def api_get_db_detailed_info(request):
                     <div style="font-weight: 600; color: var(--gray);">Память:</div>
                     <div style="font-size: 1.2em; font-weight: 600;">{bot_status.get('memory_percent', 0):.1f}%</div>
                 </div>
-                ''' if bot_status.get('status') == 'running' else ''}
+            '''
+        
+        html += f'''
             </div>
             <div style="display: flex; gap: 10px; margin-top: 15px;">
                 <button onclick="restartBot()" class="btn btn-warning" style="flex: 1;">
@@ -687,7 +695,7 @@ async def api_get_db_detailed_info(request):
                 </div>
                 <div>
                     <div style="font-weight: 600; color: var(--gray);">Общая выручка:</div>
-                    <div style="font-size: 1.2em; font-weight: 600;">{total_revenue / 100:.2f} ₽</div>
+                    <div style="font-size: 1.2em; font-weight: 600;">{revenue_formatted}</div>
                 </div>
             </div>
         </div>
@@ -717,7 +725,6 @@ async def api_get_db_detailed_info(request):
                         hideLoading();
                         if (data.success) {{
                             alert('✅ Бот перезапущен успешно!');
-                            // Обновляем страницу через 2 секунды
                             setTimeout(() => location.reload(), 2000);
                         }} else {{
                             alert('❌ Ошибка: ' + data.error);
