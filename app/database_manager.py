@@ -10,6 +10,9 @@ from datetime import datetime, timedelta
 import logging
 from typing import Optional, List, Dict, Any
 import traceback
+from aiogram import Bot
+from aiogram.types import FSInputFile
+import time
 
 logger = logging.getLogger(__name__)
 
@@ -17,7 +20,8 @@ logger = logging.getLogger(__name__)
 class DatabaseManager:
     """Класс для управления базой данных с бэкапами"""
     
-    def __init__(self, db_path: str = None):
+    def __init__(self, db_path: str = None, bot: Bot = None):
+        self.bot = bot
         self.db_path = self._find_or_create_db(db_path)
         self.backup_dir = 'backups'
         self.metadata_file = 'data/db_metadata.json'
@@ -31,9 +35,17 @@ class DatabaseManager:
         self.auto_backup_on_exit = True
         self.auto_restore_on_start = True
         self.max_backups = 10
+        self.min_db_size = 1024  # 1KB минимальный размер для бэкапа
         
         logger.info(f"📊 Менеджер БД инициализирован: {self.db_path}")
         logger.info(f"📁 Директория бэкапов: {self.backup_dir}")
+        
+        # Флаг инициализации
+        self._initialized = False
+    
+    def set_bot(self, bot: Bot):
+        """Установить бота для отправки уведомлений"""
+        self.bot = bot
     
     def _find_or_create_db(self, db_path: str = None) -> str:
         """Найти существующую БД или определить путь для новой"""
@@ -53,8 +65,8 @@ class DatabaseManager:
         ]
         
         for path in possible_paths:
-            if os.path.exists(path):
-                logger.info(f"🔍 Найдена БД: {path}")
+            if os.path.exists(path) and os.path.getsize(path) > 0:
+                logger.info(f"🔍 Найдена БД: {path} ({os.path.getsize(path):,} байт)")
                 return path
         
         # Если БД не найдена, создаем в data/bot.db
@@ -65,8 +77,11 @@ class DatabaseManager:
         # Создаем пустую БД для инициализации
         try:
             conn = sqlite3.connect(default_path)
+            conn.execute("CREATE TABLE IF NOT EXISTS init_table (id INTEGER PRIMARY KEY)")
+            conn.execute("INSERT INTO init_table DEFAULT VALUES")
+            conn.commit()
             conn.close()
-            logger.info(f"✅ Создана пустая БД: {default_path}")
+            logger.info(f"✅ Создана новая БД: {default_path}")
         except Exception as e:
             logger.error(f"❌ Ошибка создания БД: {e}")
         
@@ -79,6 +94,10 @@ class DatabaseManager:
         
         try:
             size = os.path.getsize(self.db_path)
+            
+            # Проверяем что БД не пустая
+            if size == 0:
+                return {"exists": True, "size": 0, "tables": [], "error": "БД пустая"}
             
             # Получаем список таблиц
             conn = sqlite3.connect(self.db_path)
@@ -112,6 +131,7 @@ class DatabaseManager:
                 "tables": tables,
                 "table_count": len(tables),
                 "table_stats": table_stats,
+                "total_records": sum(table_stats.values()),
                 "last_modified": last_modified,
                 "created": created,
                 "status": "ok"
@@ -156,26 +176,25 @@ class DatabaseManager:
             logger.error(f"❌ Ошибка загрузки метаданных: {e}")
             return None
     
-    def create_backup(self, backup_name: Optional[str] = None) -> Optional[str]:
+    def create_backup(self, backup_name: Optional[str] = None, send_to_admins: bool = True) -> Optional[str]:
         """Создать резервную копию базы данных"""
         try:
             # Проверяем существует ли файл БД
             if not os.path.exists(self.db_path):
                 logger.warning(f"⚠️ Файл БД не найден: {self.db_path}")
-                logger.info(f"📝 Создаю пустую БД для бэкапа: {self.db_path}")
-                
-                # Создаем пустую БД
-                conn = sqlite3.connect(self.db_path)
-                conn.close()
-                
-                if not os.path.exists(self.db_path):
-                    logger.error("❌ Не удалось создать БД для бэкапа")
-                    return None
+                return None
             
             # Проверяем размер БД
             db_size = os.path.getsize(self.db_path)
-            if db_size == 0:
-                logger.warning("⚠️ БД пустая (0 байт), создаю бэкап пустой БД")
+            if db_size < self.min_db_size:
+                logger.warning(f"⚠️ БД слишком мала ({db_size:,} байт < {self.min_db_size:,}), пропускаю бэкап")
+                return None
+            
+            # Получаем информацию о БД перед бэкапом
+            db_info = self.get_db_info()
+            if db_info.get("total_records", 0) == 0 and db_info.get("table_count", 0) <= 1:
+                logger.warning("⚠️ БД почти пустая, пропускаю бэкап")
+                return None
             
             # Генерируем имя файла
             if backup_name is None:
@@ -194,6 +213,10 @@ class DatabaseManager:
                 file_size = os.path.getsize(backup_path)
                 logger.info(f"✅ Бэкап создан: {backup_name} ({file_size:,} байт)")
                 
+                # Отправляем админам если есть бот
+                if send_to_admins and self.bot:
+                    asyncio.create_task(self._send_backup_to_admins(backup_path))
+                
                 # Сохраняем метаданные
                 self.save_metadata()
                 
@@ -210,6 +233,42 @@ class DatabaseManager:
         except Exception as e:
             logger.error(f"❌ Ошибка создания бэкапа: {e}")
             return None
+    
+    async def _send_backup_to_admins(self, backup_path: str):
+        """Отправить бэкап всем админам"""
+        try:
+            from app.config import ADMIN_IDS
+            
+            if not ADMIN_IDS:
+                logger.warning("⚠️ ADMIN_IDS не настроены, не могу отправить бэкап")
+                return
+            
+            file_size = os.path.getsize(backup_path)
+            file_size_mb = file_size / (1024 * 1024)
+            
+            caption = (
+                f"💾 <b>Новый бекап базы данных</b>\n\n"
+                f"📁 Имя: <code>{os.path.basename(backup_path)}</code>\n"
+                f"📊 Размер: {file_size_mb:.2f} MB\n"
+                f"⏰ Время: {datetime.now().strftime('%H:%M:%S')}\n\n"
+                f"💡 Для восстановления используйте команду:\n"
+                f"<code>/restore_{os.path.basename(backup_path).replace('.db', '')}</code>"
+            )
+            
+            for admin_id in ADMIN_IDS:
+                try:
+                    await self.bot.send_document(
+                        chat_id=admin_id,
+                        document=FSInputFile(backup_path),
+                        caption=caption,
+                        parse_mode="HTML"
+                    )
+                    logger.info(f"📤 Бэкап отправлен админу {admin_id}")
+                except Exception as e:
+                    logger.error(f"❌ Ошибка отправки бэкапа админу {admin_id}: {e}")
+            
+        except Exception as e:
+            logger.error(f"❌ Ошибка отправки бэкапа админам: {e}")
     
     def create_backup_on_exit(self):
         """Создать бэкап при выходе из приложения"""
@@ -231,11 +290,17 @@ class DatabaseManager:
             return
         
         db_size = os.path.getsize(self.db_path)
-        if db_size < 1024:  # Меньше 1KB
-            logger.warning(f"⚠️ БД слишком мала ({db_size} байт), пропускаю бэкап")
+        if db_size < self.min_db_size:
+            logger.warning(f"⚠️ БД слишком мала ({db_size:,} байт), пропускаю бэкап")
             return
         
-        result = self.create_backup("exit_backup.db")
+        # Проверяем есть ли данные в БД
+        db_info = self.get_db_info()
+        if db_info.get("total_records", 0) == 0:
+            logger.warning("⚠️ БД пустая, пропускаю бэкап")
+            return
+        
+        result = self.create_backup("exit_backup.db", send_to_admins=False)
         if result:
             logger.info(f"✅ Бэкап перед выходом создан: {result}")
         else:
@@ -250,11 +315,11 @@ class DatabaseManager:
             
             # Проверяем валидность бэкапа
             if not self.validate_backup(backup_path):
-                logger.warning(f"⚠️ Бэкап может быть поврежден: {backup_path}")
-                # Все равно пытаемся восстановить
+                logger.error(f"❌ Бэкап поврежден: {backup_path}")
+                return False
             
             # Создаем бэкап текущей БД (если существует)
-            if os.path.exists(self.db_path):
+            if os.path.exists(self.db_path) and os.path.getsize(self.db_path) > self.min_db_size:
                 timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
                 old_backup = os.path.join(self.backup_dir, f"before_restore_{timestamp}.db")
                 try:
@@ -262,6 +327,9 @@ class DatabaseManager:
                     logger.info(f"💾 Сохранена текущая БД перед восстановлением: {old_backup}")
                 except Exception as e:
                     logger.warning(f"⚠️ Не удалось сохранить текущую БД: {e}")
+            
+            # Останавливаем все соединения с БД
+            time.sleep(1)  # Даем время на закрытие соединений
             
             # Восстанавливаем из бэкапа
             logger.info(f"🔄 Восстановление БД из бэкапа: {backup_path}")
@@ -291,8 +359,8 @@ class DatabaseManager:
         # Проверяем состояние текущей БД
         db_info = self.get_db_info()
         
-        # Если БД существует и не пустая
-        if db_info["exists"] and db_info.get("size", 0) > 1024:  # Больше 1KB
+        # Если БД существует и содержит данные
+        if db_info["exists"] and db_info.get("total_records", 0) > 0:
             logger.info("✅ Текущая БД в порядке, восстановление не требуется")
             return False
         
@@ -336,6 +404,10 @@ class DatabaseManager:
                     try:
                         stat = os.stat(filepath)
                         
+                        # Пропускаем слишком маленькие файлы
+                        if stat.st_size < self.min_db_size:
+                            continue
+                        
                         # Проверяем валидность бэкапа
                         is_valid = self.validate_backup(filepath)
                         
@@ -356,7 +428,7 @@ class DatabaseManager:
             
             # Сортируем по дате создания (старые сначала)
             backups.sort(key=lambda x: x["created"])
-            logger.debug(f"ℹ️ Найдено {len(backups)} бэкапов")
+            logger.debug(f"ℹ️ Найдено {len(backups)} валидных бэкапов")
             return backups
             
         except Exception as e:
@@ -371,8 +443,7 @@ class DatabaseManager:
         try:
             # Проверяем размер файла
             file_size = os.path.getsize(backup_path)
-            if file_size == 0:
-                logger.debug(f"⚠️ Бэкап пустой: {backup_path}")
+            if file_size < self.min_db_size:
                 return False
             
             # Пытаемся подключиться к БД
@@ -383,14 +454,18 @@ class DatabaseManager:
             cursor.execute("SELECT name FROM sqlite_master WHERE type='table'")
             tables = [row[0] for row in cursor.fetchall()]
             
+            # Проверяем наличие обязательных таблиц
+            required_tables = ['users', 'anon_messages', 'payments']
+            found_tables = [table for table in required_tables if table in tables]
+            
             conn.close()
             
-            # Проверяем наличие хотя бы одной таблицы
-            if len(tables) == 0:
-                logger.debug(f"⚠️ Бэкап не содержит таблиц: {backup_path}")
+            # Проверяем наличие хотя бы одной обязательной таблицы
+            if len(found_tables) == 0:
+                logger.debug(f"⚠️ Бэкап не содержит обязательных таблиц: {backup_path}")
                 return False
             
-            logger.debug(f"✅ Бэкап валиден: {backup_path} (таблиц: {len(tables)})")
+            logger.debug(f"✅ Бэкап валиден: {backup_path} (таблиц: {len(tables)}, обязательных: {len(found_tables)})")
             return True
             
         except Exception as e:
@@ -517,7 +592,7 @@ class DatabaseManager:
                 return False
             
             # Создаем бэкап перед импортом
-            self.create_backup("before_import.db")
+            self.create_backup("before_import.db", send_to_admins=False)
             
             conn = sqlite3.connect(self.db_path)
             cursor = conn.cursor()
@@ -612,38 +687,10 @@ class DatabaseManager:
 db_manager = DatabaseManager()
 
 
-# Декоратор для автоматического бэкапа при выходе
-def backup_on_exit(func):
-    """Декоратор для автоматического создания бэкапа при выходе из функции"""
-    def wrapper(*args, **kwargs):
-        try:
-            result = func(*args, **kwargs)
-            return result
-        finally:
-            # Создаем бэкап при выходе
-            try:
-                db_manager.create_backup_on_exit()
-            except Exception as e:
-                logger.error(f"❌ Ошибка в декораторе backup_on_exit: {e}")
-    
-    async def async_wrapper(*args, **kwargs):
-        try:
-            result = await func(*args, **kwargs)
-            return result
-        finally:
-            # Создаем бэкап при выходе
-            try:
-                db_manager.create_backup_on_exit()
-            except Exception as e:
-                logger.error(f"❌ Ошибка в декораторе backup_on_exit (async): {e}")
-    
-    return async_wrapper if asyncio.iscoroutinefunction(func) else wrapper
-
-
 # Инициализация при импорте
 _db_initialized = False
 
-def init_database_manager() -> bool:
+def init_database_manager(bot: Bot = None) -> bool:
     """Инициализация менеджера БД при запуске"""
     global _db_initialized
     
@@ -654,20 +701,29 @@ def init_database_manager() -> bool:
     _db_initialized = True
     logger.info("🚀 Инициализация менеджера БД...")
     
+    # Устанавливаем бота если передан
+    if bot:
+        db_manager.set_bot(bot)
+    
     # Автоматическое восстановление при запуске
     restored = db_manager.auto_restore_on_startup()
     
-    # Создаем начальный бэкап если БД только что создана
+    # Ждем инициализации таблиц
+    time.sleep(2)
+    
+    # Создаем начальный бэкап если БД содержит данные
     db_info = db_manager.get_db_info()
     backups = db_manager.list_backups()
     
-    if db_info["exists"] and len(backups) == 0:
+    if db_info.get("total_records", 0) > 0 and len(backups) == 0:
         logger.info("📝 Создание начального бэкапа...")
         result = db_manager.create_backup("initial_backup.db")
         if result:
             logger.info(f"✅ Начальный бэкап создан: {result}")
         else:
             logger.warning("⚠️ Не удалось создать начальный бэкап")
+    elif db_info.get("total_records", 0) > 0:
+        logger.info("✅ Бэкапы уже существуют")
     
     logger.info("✅ Менеджер БД готов к работе")
     return restored
@@ -676,6 +732,7 @@ def init_database_manager() -> bool:
 # Инициализируем при импорте
 if __name__ != "__main__":
     try:
+        # Запускаем без бота, бот будет установлен позже
         init_database_manager()
     except Exception as e:
         logger.error(f"❌ Ошибка при автоматической инициализации менеджера БД: {e}")
