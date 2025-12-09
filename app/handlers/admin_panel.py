@@ -286,11 +286,10 @@ async def cmd_exportdb(message: Message):
     except Exception as e:
         await message.answer(f"❌ Ошибка экспорта: {str(e)}")
 
-
 # ==================== ЗАГРУЗКА БАЗЫ ДАННЫХ ====================
 
 @router.message(F.document, admin_filter)
-async def handle_database_upload(message: types.Message):
+async def handle_database_upload(message: types.Message, bot: Bot):
     """Обработка загрузки базы данных"""
     if not is_admin(message.from_user.id):
         return
@@ -298,7 +297,7 @@ async def handle_database_upload(message: types.Message):
     document = message.document
     
     # Проверяем что это файл базы данных
-    if not document.file_name.endswith('.db'):
+    if not document.file_name or not document.file_name.endswith('.db'):
         await message.answer("❌ Можно загружать только файлы баз данных (.db)")
         return
     
@@ -318,8 +317,6 @@ async def handle_database_upload(message: types.Message):
         # Скачиваем файл
         file_path = os.path.join(upload_dir, document.file_name)
         
-        from aiogram import Bot
-        bot = Bot.get_current()
         file = await bot.get_file(document.file_id)
         await bot.download_file(file.file_path, file_path)
         
@@ -329,7 +326,7 @@ async def handle_database_upload(message: types.Message):
             await message.answer("❌ Файл не является валидной базой данных SQLite")
             return
         
-        # Спрашиваем подтверждение
+        # Получаем информацию о файле
         file_size_mb = document.file_size / (1024 * 1024)
         
         await message.answer(
@@ -360,7 +357,7 @@ async def handle_database_upload(message: types.Message):
         await message.answer(f"❌ Ошибка загрузки файла: {str(e)[:200]}")
 
 @router.callback_query(F.data.startswith("confirm_restore_"))
-async def confirm_restore_database(callback: types.CallbackQuery):
+async def confirm_restore_database(callback: types.CallbackQuery, bot: Bot):
     """Подтверждение восстановления из загруженного файла"""
     if not is_admin(callback.from_user.id):
         await callback.answer("❌ Доступ запрещен")
@@ -389,7 +386,7 @@ async def confirm_restore_database(callback: types.CallbackQuery):
         success = db_manager.restore_from_backup(file_path)
         
         if success:
-            # Отправляем новую БД админу
+            # Получаем информацию о восстановленной БД
             db_info = db_manager.get_db_info()
             
             # Создаем бэкап восстановленной БД
@@ -405,26 +402,38 @@ async def confirm_restore_database(callback: types.CallbackQuery):
                 parse_mode="HTML"
             )
             
-            # Отправляем файл БД
+            # Отправляем файл БД всем админам
             try:
                 from app.config import ADMIN_IDS
-                bot = Bot.get_current()
                 
                 for admin_id in ADMIN_IDS:
-                    await bot.send_document(
-                        chat_id=admin_id,
-                        document=FSInputFile(db_manager.db_path),
-                        caption=f"📁 Восстановленная база данных\n⏰ {datetime.now().strftime('%H:%M:%S')}"
-                    )
+                    try:
+                        await bot.send_document(
+                            chat_id=admin_id,
+                            document=FSInputFile(db_manager.db_path),
+                            caption=(
+                                f"📁 Восстановленная база данных\n"
+                                f"⏰ {datetime.now().strftime('%H:%M:%S')}\n"
+                                f"📊 {db_info.get('size_mb', 0):.2f} MB"
+                            )
+                        )
+                        logger.info(f"📤 БД отправлена админу {admin_id}")
+                    except Exception as e:
+                        logger.error(f"❌ Ошибка отправки БД админу {admin_id}: {e}")
+                        
             except Exception as e:
-                logger.error(f"❌ Ошибка отправки БД: {e}")
+                logger.error(f"❌ Ошибка отправки БД админам: {e}")
             
         else:
             await callback.message.answer("❌ Ошибка восстановления базы данных")
         
         # Удаляем загруженный файл
         if os.path.exists(file_path):
-            os.remove(file_path)
+            try:
+                os.remove(file_path)
+                logger.info(f"🗑️ Удален загруженный файл: {file_name}")
+            except Exception as e:
+                logger.error(f"❌ Ошибка удаления файла {file_name}: {e}")
         
     except Exception as e:
         logger.error(f"❌ Ошибка восстановления: {e}")
@@ -439,6 +448,18 @@ async def cancel_restore_database(callback: types.CallbackQuery):
         await callback.answer("❌ Доступ запрещен")
         return
     
+    # Удаляем загруженный файл если есть
+    try:
+        upload_dir = 'uploads'
+        if os.path.exists(upload_dir):
+            # Удаляем все файлы из uploads
+            for filename in os.listdir(upload_dir):
+                file_path = os.path.join(upload_dir, filename)
+                if os.path.isfile(file_path):
+                    os.remove(file_path)
+    except Exception as e:
+        logger.error(f"❌ Ошибка очистки uploads: {e}")
+    
     await callback.message.answer("❌ Восстановление отменено")
     await callback.answer()
 
@@ -450,11 +471,17 @@ async def upload_db_command(message: types.Message):
         "Для загрузки новой базы данных:\n"
         "1. Отправьте мне файл <code>.db</code>\n"
         "2. Подтвердите восстановление\n"
-        "3. Перезапустите бота\n\n"
+        "3. Перезапустите бота командой <code>/restart</code>\n\n"
         "⚠️ <b>Внимание:</b>\n"
         "• Текущая БД будет заменена\n"
         "• Создается резервная копия\n"
-        "• Максимальный размер файла: 100MB",
+        "• Максимальный размер файла: 100MB\n"
+        "• Файл должен быть SQLite базой данных\n\n"
+        "<b>Быстрые команды:</b>\n"
+        "<code>/backup_now</code> - создать backup\n"
+        "<code>/backups</code> - список бэкапов\n"
+        "<code>/upload_db</code> - загрузить БД\n"
+        "<code>/db_status</code> - статус БД",
         parse_mode="HTML"
     )
 
