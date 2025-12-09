@@ -31,7 +31,9 @@ def setup_routes(app: web.Application):
         api_send_to_admins,
         api_send_current_db_to_admins,
         api_upload_db,
-        api_send_backup
+        api_send_backup,
+        api_restart_bot,      # НОВЫЙ
+        api_bot_status        # НОВЫЙ
     )
     
     logger.info("📋 Регистрация маршрутов веб-панели...")
@@ -61,6 +63,10 @@ def setup_routes(app: web.Application):
     app.router.add_get('/api/send_to_admins', api_send_to_admins)
     app.router.add_get('/api/send_current_db_to_admins', api_send_current_db_to_admins)
     app.router.add_post('/api/upload_db', api_upload_db)
+    
+    # API для управления ботом
+    app.router.add_get('/api/restart_bot', api_restart_bot)
+    app.router.add_get('/api/bot_status', api_bot_status)
     
     # Legacy endpoints для совместимости
     app.router.add_get('/create_backup', api_create_backup)
