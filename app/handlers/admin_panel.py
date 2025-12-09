@@ -203,6 +203,61 @@ async def cmd_restore_selected(message: Message):
     except Exception as e:
         await message.answer(f"❌ Ошибка восстановления: {str(e)}")
 
+
+@router.message(Command("auto_restore"), admin_filter)
+async def auto_restore_command(message: types.Message):
+    """Запуск автоматического восстановления"""
+    await message.answer("🔄 Запуск автоматического восстановления...")
+    
+    try:
+        import subprocess
+        import sys
+        
+        result = subprocess.run(
+            [sys.executable, "auto_restore.py"],
+            capture_output=True,
+            text=True,
+            timeout=30
+        )
+        
+        if result.returncode == 0:
+            response = (
+                "✅ <b>Автовосстановление завершено!</b>\n\n"
+                f"📄 Лог:\n<code>{result.stdout[:1000] if result.stdout else 'Нет вывода'}</code>"
+            )
+        else:
+            response = (
+                "❌ <b>Автовосстановление не удалось</b>\n\n"
+                f"📄 Ошибка:\n<code>{result.stderr[:1000] if result.stderr else 'Неизвестная ошибка'}</code>"
+            )
+            
+        await message.answer(response, parse_mode="HTML")
+        
+    except Exception as e:
+        await message.answer(f"❌ Ошибка: {str(e)[:200]}")
+
+@router.message(Command("setup_auto_restore"), admin_filter)
+async def setup_auto_restore_command(message: types.Message):
+    """Настройка автовосстановления"""
+    await message.answer(
+        "⚙️ <b>Настройка автовосстановления БД</b>\n\n"
+        "📁 <b>Как это работает:</b>\n"
+        "1. При каждом деплое проверяется БД\n"
+        "2. Если БД повреждена или отсутствует\n"
+        "3. Автоматически восстанавливается из бэкапа\n"
+        "4. Или создается новая\n\n"
+        "🔧 <b>Текущие настройки:</b>\n"
+        "• Восстановление из локальных бэкапов: ✅\n"
+        "• Создание новой БД при ошибке: ✅\n"
+        "• URL для скачивания: ❌\n\n"
+        "💡 <b>Команды:</b>\n"
+        "<code>/auto_restore</code> - запустить сейчас\n"
+        "<code>/backup_now</code> - создать бэкап\n"
+        "<code>/db_status</code> - статус БД",
+        parse_mode="HTML"
+    )
+
+
 @router.message(Command("dbinfo"), admin_filter)
 async def cmd_dbinfo(message: Message):
     """Информация о базе данных"""
