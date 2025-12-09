@@ -6,6 +6,10 @@ import json
 import os
 import shutil
 import sqlite3
+import subprocess
+import sys
+import signal
+import psutil
 from datetime import datetime
 import asyncio
 from web.utils.database import get_stats
@@ -16,6 +20,9 @@ import sys
 sys.path.append(os.path.join(os.path.dirname(__file__), '..', '..'))
 from app.database_manager import db_manager
 from app.config import ADMIN_IDS, BOT_TOKEN
+
+# Глобальная переменная для хранения процесса бота
+bot_process = None
 
 async def send_backup_to_telegram(file_path, caption):
     """Отправить файл в Telegram админам"""
@@ -57,6 +64,160 @@ async def send_backup_to_telegram(file_path, caption):
         print(f"❌ Ошибка в send_backup_to_telegram: {e}")
         return {"sent": 0, "total": len(ADMIN_IDS), "error": str(e)}
 
+async def restart_bot_process():
+    """Перезапустить процесс бота"""
+    global bot_process
+    
+    try:
+        print("🔄 Запуск перезапуска бота...")
+        
+        # 1. Найти PID бота
+        bot_pid = None
+        for proc in psutil.process_iter(['pid', 'name', 'cmdline']):
+            try:
+                cmdline = proc.info['cmdline']
+                if cmdline and any('run_bot.py' in str(arg) for arg in cmdline):
+                    bot_pid = proc.info['pid']
+                    print(f"🔍 Найден процесс бота: PID {bot_pid}")
+                    break
+            except (psutil.NoSuchProcess, psutil.AccessDenied):
+                continue
+        
+        if bot_pid:
+            try:
+                # 2. Завершить процесс бота
+                print(f"⏹️ Завершаю процесс бота (PID {bot_pid})...")
+                os.kill(bot_pid, signal.SIGTERM)
+                
+                # Ждем завершения
+                for i in range(10):
+                    try:
+                        psutil.Process(bot_pid)
+                        print(f"⏳ Ожидание завершения... {i+1}/10")
+                        await asyncio.sleep(1)
+                    except psutil.NoSuchProcess:
+                        print("✅ Процесс бота завершен")
+                        break
+                
+                await asyncio.sleep(2)  # Дополнительная пауза
+            except Exception as e:
+                print(f"⚠️ Ошибка при завершении процесса: {e}")
+        
+        # 3. Запустить новый процесс бота
+        print("🚀 Запускаю новый процесс бота...")
+        
+        # Определяем путь к скрипту бота
+        bot_script = 'run_bot.py'
+        if not os.path.exists(bot_script):
+            bot_script = 'app/run_bot.py'
+            if not os.path.exists(bot_script):
+                bot_script = 'anon_bot.py'
+        
+        if os.path.exists(bot_script):
+            # Запускаем в фоновом режиме
+            if sys.platform == 'win32':
+                bot_process = subprocess.Popen(
+                    [sys.executable, bot_script],
+                    stdout=subprocess.PIPE,
+                    stderr=subprocess.PIPE,
+                    creationflags=subprocess.CREATE_NEW_PROCESS_GROUP
+                )
+            else:
+                bot_process = subprocess.Popen(
+                    [sys.executable, bot_script],
+                    stdout=subprocess.PIPE,
+                    stderr=subprocess.PIPE,
+                    start_new_session=True
+                )
+            
+            print(f"✅ Бот запущен (PID {bot_process.pid})")
+            return True
+        else:
+            print(f"❌ Файл бота не найден: {bot_script}")
+            return False
+            
+    except Exception as e:
+        print(f"❌ Ошибка перезапуска бота: {e}")
+        import traceback
+        traceback.print_exc()
+        return False
+
+async def check_bot_status():
+    """Проверить статус бота"""
+    try:
+        for proc in psutil.process_iter(['pid', 'name', 'cmdline']):
+            try:
+                cmdline = proc.info['cmdline']
+                if cmdline and any('run_bot.py' in str(arg) for arg in cmdline):
+                    return {
+                        'status': 'running',
+                        'pid': proc.info['pid'],
+                        'name': proc.info['name'],
+                        'cpu_percent': proc.cpu_percent(),
+                        'memory_percent': proc.memory_percent()
+                    }
+            except (psutil.NoSuchProcess, psutil.AccessDenied):
+                continue
+        
+        return {'status': 'stopped'}
+        
+    except Exception as e:
+        return {'status': 'error', 'error': str(e)}
+
+async def api_restart_bot(request):
+    """API для перезапуска бота"""
+    try:
+        # Проверяем статус перед перезапуском
+        status_before = await check_bot_status()
+        
+        # Перезапускаем бота
+        success = await restart_bot_process()
+        
+        if success:
+            # Ждем немного и проверяем статус
+            await asyncio.sleep(3)
+            status_after = await check_bot_status()
+            
+            return web.json_response({
+                'success': True,
+                'message': 'Бот перезапущен успешно',
+                'status_before': status_before,
+                'status_after': status_after,
+                'timestamp': datetime.now().isoformat()
+            })
+        else:
+            return web.json_response({
+                'success': False,
+                'error': 'Не удалось перезапустить бота',
+                'status_before': status_before,
+                'timestamp': datetime.now().isoformat()
+            })
+            
+    except Exception as e:
+        return web.json_response({
+            'success': False,
+            'error': str(e),
+            'timestamp': datetime.now().isoformat()
+        }, status=500)
+
+async def api_bot_status(request):
+    """API для проверки статуса бота"""
+    try:
+        status = await check_bot_status()
+        
+        return web.json_response({
+            'success': True,
+            'status': status,
+            'timestamp': datetime.now().isoformat()
+        })
+        
+    except Exception as e:
+        return web.json_response({
+            'success': False,
+            'error': str(e),
+            'timestamp': datetime.now().isoformat()
+        }, status=500)
+
 async def api_stats_handler(request):
     """API для получения статистики"""
     try:
@@ -93,7 +254,7 @@ async def api_system_stats_handler(request):
         }, status=500)
 
 async def api_create_backup(request):
-    """API для создания бэкапа - возвращаем JSON а не редирект"""
+    """API для создания бэкапа"""
     try:
         backup_path = db_manager.create_backup()
         
@@ -162,12 +323,19 @@ async def api_restore_backup(request):
                 f"🔄 БД восстановлена из бэкапа\n📁 {file_name}\n⚠️ Перезапустите бота для применения изменений"
             )
             
-            return web.json_response({
+            # Автоматически предлагаем перезапустить бота
+            bot_status = await check_bot_status()
+            
+            response = {
                 'success': True,
-                'message': f'БД восстановлена из {file_name}. Перезапустите бота для применения изменений.',
-                'timestamp': datetime.now().isoformat(),
-                'requires_restart': True
-            })
+                'message': f'БД восстановлена из {file_name}.',
+                'requires_restart': True,
+                'bot_status': bot_status,
+                'restart_available': True,
+                'timestamp': datetime.now().isoformat()
+            }
+            
+            return web.json_response(response)
         else:
             return web.json_response({
                 'success': False,
@@ -415,6 +583,9 @@ async def api_get_db_detailed_info(request):
         
         conn.close()
         
+        # Проверяем статус бота
+        bot_status = await check_bot_status()
+        
         html = f'''
         <div style="display: grid; grid-template-columns: repeat(2, 1fr); gap: 20px; margin-bottom: 30px;">
             <div style="background: rgba(99, 102, 241, 0.1); padding: 20px; border-radius: 15px;">
@@ -435,6 +606,43 @@ async def api_get_db_detailed_info(request):
             <div style="background: rgba(245, 158, 11, 0.1); padding: 20px; border-radius: 15px;">
                 <div style="font-weight: 600; color: var(--warning); margin-bottom: 5px;">Всего записей:</div>
                 <div style="font-size: 1.5em; font-weight: 800;">{db_info.get('total_records', 0):,}</div>
+            </div>
+        </div>
+        
+        <!-- Статус бота -->
+        <div style="background: { 'rgba(16, 185, 129, 0.1)' if bot_status.get('status') == 'running' else 'rgba(239, 68, 68, 0.1)' }; padding: 20px; border-radius: 15px; margin-bottom: 20px;">
+            <h4 style="color: { 'var(--success)' if bot_status.get('status') == 'running' else 'var(--danger)' }; margin-bottom: 15px;">
+                <i class="fas fa-robot"></i> Статус бота: {'✅ Запущен' if bot_status.get('status') == 'running' else '❌ Остановлен'}
+            </h4>
+            <div style="display: grid; grid-template-columns: repeat(2, 1fr); gap: 15px;">
+                <div>
+                    <div style="font-weight: 600; color: var(--gray);">Статус:</div>
+                    <div style="font-size: 1.2em; font-weight: 600; color: { 'var(--success)' if bot_status.get('status') == 'running' else 'var(--danger)' };">
+                        {bot_status.get('status', 'unknown')}
+                    </div>
+                </div>
+                {f'''
+                <div>
+                    <div style="font-weight: 600; color: var(--gray);">PID:</div>
+                    <div style="font-size: 1.2em; font-weight: 600;">{bot_status.get('pid', 'N/A')}</div>
+                </div>
+                <div>
+                    <div style="font-weight: 600; color: var(--gray);">CPU:</div>
+                    <div style="font-size: 1.2em; font-weight: 600;">{bot_status.get('cpu_percent', 0):.1f}%</div>
+                </div>
+                <div>
+                    <div style="font-weight: 600; color: var(--gray);">Память:</div>
+                    <div style="font-size: 1.2em; font-weight: 600;">{bot_status.get('memory_percent', 0):.1f}%</div>
+                </div>
+                ''' if bot_status.get('status') == 'running' else ''}
+            </div>
+            <div style="display: flex; gap: 10px; margin-top: 15px;">
+                <button onclick="restartBot()" class="btn btn-warning" style="flex: 1;">
+                    <i class="fas fa-sync-alt"></i> Перезапустить бота
+                </button>
+                <button onclick="checkBotStatus()" class="btn btn-info" style="flex: 1;">
+                    <i class="fas fa-sync"></i> Обновить статус
+                </button>
             </div>
         </div>
         
@@ -493,13 +701,60 @@ async def api_get_db_detailed_info(request):
                 <button onclick="createNewBackup()" class="btn btn-success" style="flex: 1;">
                     <i class="fas fa-plus"></i> Создать бекап
                 </button>
+                <button onclick="restartBot()" class="btn btn-danger" style="flex: 1;">
+                    <i class="fas fa-sync-alt"></i> Перезапустить бота
+                </button>
             </div>
         </div>
+        
+        <script>
+        function restartBot() {{
+            if (confirm('Перезапустить бота?\\nБот будет остановлен и запущен заново.')) {{
+                showLoading('Перезапуск бота...');
+                fetch('/api/restart_bot')
+                    .then(response => response.json())
+                    .then(data => {{
+                        hideLoading();
+                        if (data.success) {{
+                            alert('✅ Бот перезапущен успешно!');
+                            // Обновляем страницу через 2 секунды
+                            setTimeout(() => location.reload(), 2000);
+                        }} else {{
+                            alert('❌ Ошибка: ' + data.error);
+                        }}
+                    }})
+                    .catch(error => {{
+                        hideLoading();
+                        alert('❌ Ошибка сети: ' + error);
+                    }});
+            }}
+        }}
+        
+        function checkBotStatus() {{
+            showLoading('Проверка статуса...');
+            fetch('/api/bot_status')
+                .then(response => response.json())
+                .then(data => {{
+                    hideLoading();
+                    if (data.success) {{
+                        const status = data.status;
+                        if (status.status === 'running') {{
+                            alert(`✅ Бот запущен\\nPID: ${{status.pid}}\\nCPU: ${{status.cpu_percent?.toFixed(1) || 0}}%\\nПамять: ${{status.memory_percent?.toFixed(1) || 0}}%`);
+                        }} else {{
+                            alert('❌ Бот остановлен');
+                        }}
+                    }} else {{
+                        alert('❌ Ошибка: ' + data.error);
+                    }}
+                }});
+        }}
+        </script>
         '''
         
         return web.json_response({
             'success': True,
-            'html': html
+            'html': html,
+            'bot_status': bot_status
         })
         
     except Exception as e:
@@ -651,10 +906,15 @@ async def api_upload_db(request):
                     "🔄 Новая БД загружена через веб-панель"
                 )
             
+            # Проверяем статус бота
+            bot_status = await check_bot_status()
+            
             return web.json_response({
                 'success': True,
-                'message': '✅ БД успешно загружена и восстановлена!\n⚠️ Перезапустите бота для применения изменений.',
+                'message': '✅ БД успешно загружена и восстановлена!',
                 'requires_restart': True,
+                'bot_status': bot_status,
+                'restart_available': True,
                 'timestamp': datetime.now().isoformat()
             })
         else:
