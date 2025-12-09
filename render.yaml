@@ -3,13 +3,12 @@ services:
     name: anon-tg-bot
     env: python
     buildCommand: pip install -r requirements.txt
-    startCommand: python -m gunicorn render_server:app --bind 0.0.0.0:$PORT --worker-class aiohttp.GunicornWebWorker
+    startCommand: bash startup.sh
     envVars:
       - key: DATABASE_URL
         fromDatabase:
           name: bot-database
           property: connectionString
-    # Добавьте постоянное хранилище
     disk:
       name: bot-data
       mountPath: /opt/render/project/src/data
