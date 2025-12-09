@@ -17,6 +17,46 @@ sys.path.append(os.path.join(os.path.dirname(__file__), '..', '..'))
 from app.database_manager import db_manager
 from app.config import ADMIN_IDS, BOT_TOKEN
 
+async def send_backup_to_telegram(file_path, caption):
+    """Отправить файл в Telegram админам"""
+    try:
+        # Динамический импорт aiogram чтобы избежать циклических импортов
+        from aiogram import Bot
+        from aiogram.types import FSInputFile
+        
+        if not BOT_TOKEN:
+            print("⚠️ BOT_TOKEN не настроен")
+            return {"sent": 0, "total": len(ADMIN_IDS), "error": "BOT_TOKEN не настроен"}
+        
+        if not ADMIN_IDS:
+            print("⚠️ ADMIN_IDS не настроены")
+            return {"sent": 0, "total": 0, "error": "ADMIN_IDS не настроены"}
+        
+        bot = Bot(token=BOT_TOKEN)
+        sent_count = 0
+        
+        file_size = os.path.getsize(file_path)
+        file_size_mb = file_size / (1024 * 1024)
+        
+        for admin_id in ADMIN_IDS:
+            try:
+                await bot.send_document(
+                    chat_id=admin_id,
+                    document=FSInputFile(file_path),
+                    caption=f"{caption}\n📊 Размер: {file_size_mb:.2f} MB\n⏰ {datetime.now().strftime('%H:%M:%S')}"
+                )
+                sent_count += 1
+                print(f"✅ Отправлено админу {admin_id}")
+            except Exception as e:
+                print(f"❌ Ошибка отправки админу {admin_id}: {e}")
+        
+        await bot.session.close()
+        return {"sent": sent_count, "total": len(ADMIN_IDS)}
+        
+    except Exception as e:
+        print(f"❌ Ошибка в send_backup_to_telegram: {e}")
+        return {"sent": 0, "total": len(ADMIN_IDS), "error": str(e)}
+
 async def api_stats_handler(request):
     """API для получения статистики"""
     try:
@@ -53,7 +93,7 @@ async def api_system_stats_handler(request):
         }, status=500)
 
 async def api_create_backup(request):
-    """API для создания бэкапа"""
+    """API для создания бэкапа - возвращаем JSON а не редирект"""
     try:
         backup_path = db_manager.create_backup()
         
@@ -61,14 +101,27 @@ async def api_create_backup(request):
             backup_name = os.path.basename(backup_path)
             size = os.path.getsize(backup_path)
             
-            return web.json_response({
+            # Отправляем админам через Telegram
+            send_result = await send_backup_to_telegram(
+                backup_path, 
+                f"💾 Новый бекап базы данных\n📁 {backup_name}"
+            )
+            
+            response_data = {
                 'success': True,
                 'backup_name': backup_name,
                 'size': size,
-                'size_mb': size / (1024 * 1024),
+                'size_mb': round(size / (1024 * 1024), 2),
                 'timestamp': datetime.now().isoformat(),
-                'backup_count': len(db_manager.list_backups())
-            })
+                'backup_count': len(db_manager.list_backups()),
+                'telegram_sent': send_result['sent'],
+                'telegram_total': send_result['total']
+            }
+            
+            if 'error' in send_result:
+                response_data['telegram_error'] = send_result['error']
+            
+            return web.json_response(response_data)
         else:
             return web.json_response({
                 'success': False,
@@ -103,15 +156,22 @@ async def api_restore_backup(request):
         success = db_manager.restore_from_backup(backup_path)
         
         if success:
+            # Отправляем уведомление админам
+            await send_backup_to_telegram(
+                backup_path,
+                f"🔄 БД восстановлена из бэкапа\n📁 {file_name}\n⚠️ Перезапустите бота для применения изменений"
+            )
+            
             return web.json_response({
                 'success': True,
-                'message': f'БД восстановлена из {file_name}',
-                'timestamp': datetime.now().isoformat()
+                'message': f'БД восстановлена из {file_name}. Перезапустите бота для применения изменений.',
+                'timestamp': datetime.now().isoformat(),
+                'requires_restart': True
             })
         else:
             return web.json_response({
                 'success': False,
-                'error': 'Ошибка восстановления'
+                'error': 'Ошибка восстановления БД'
             }, status=500)
             
     except Exception as e:
@@ -143,13 +203,11 @@ async def api_dbinfo(request):
     try:
         db_info = db_manager.get_db_info()
         backups = db_manager.list_backups()
-        metadata = db_manager.load_metadata()
         
         return web.json_response({
             'success': True,
             'db_info': db_info,
             'backup_count': len(backups),
-            'metadata': metadata,
             'timestamp': datetime.now().isoformat()
         })
             
@@ -432,9 +490,9 @@ async def api_get_db_detailed_info(request):
                 <button onclick="sendCurrentDbToAdmins()" class="btn btn-warning" style="flex: 1;">
                     <i class="fas fa-paper-plane"></i> Отправить эту БД админам
                 </button>
-                <a href="/api/create_backup" class="btn btn-success" style="flex: 1;">
+                <button onclick="createNewBackup()" class="btn btn-success" style="flex: 1;">
                     <i class="fas fa-plus"></i> Создать бекап
-                </a>
+                </button>
             </div>
         </div>
         '''
@@ -467,14 +525,23 @@ async def api_send_to_admins(request):
                 'error': 'Файл не найден'
             }, status=404)
         
-        # Используем функцию из database_manager
-        result = await db_manager._send_backup_to_admins(backup_path)
+        # Отправляем админам через Telegram
+        result = await send_backup_to_telegram(backup_path, f"📁 Бекап БД: {file_name}")
         
-        return web.json_response({
-            'success': True,
-            'message': f'Бэкап {file_name} отправлен админам',
-            'timestamp': datetime.now().isoformat()
-        })
+        if 'error' in result:
+            return web.json_response({
+                'success': False,
+                'error': result['error'],
+                'sent': result['sent'],
+                'total': result['total']
+            })
+        else:
+            return web.json_response({
+                'success': True,
+                'sent': result['sent'],
+                'total': result['total'],
+                'message': f'Отправлено {result["sent"]} из {result["total"]} админам'
+            })
             
     except Exception as e:
         return web.json_response({
@@ -486,13 +553,25 @@ async def api_send_current_db_to_admins(request):
     """API для отправки текущей БД админам"""
     try:
         # Отправляем текущую БД
-        result = await db_manager._send_backup_to_admins(db_manager.db_path)
+        result = await send_backup_to_telegram(
+            db_manager.db_path, 
+            "💾 Текущая база данных"
+        )
         
-        return web.json_response({
-            'success': True,
-            'message': 'Текущая БД отправлена админам',
-            'timestamp': datetime.now().isoformat()
-        })
+        if 'error' in result:
+            return web.json_response({
+                'success': False,
+                'error': result['error'],
+                'sent': result['sent'],
+                'total': result['total']
+            })
+        else:
+            return web.json_response({
+                'success': True,
+                'sent': result['sent'],
+                'total': result['total'],
+                'message': f'Отправлено {result["sent"]} из {result["total"]} админам'
+            })
             
     except Exception as e:
         return web.json_response({
@@ -523,7 +602,7 @@ async def api_upload_db(request):
         upload_dir = 'uploads'
         os.makedirs(upload_dir, exist_ok=True)
         
-        filepath = os.path.join(upload_dir, filename)
+        filepath = os.path.join(upload_dir, f"upload_{int(datetime.now().timestamp())}_{filename}")
         
         # Записываем файл
         size = 0
@@ -535,6 +614,8 @@ async def api_upload_db(request):
                 size += len(chunk)
                 f.write(chunk)
         
+        print(f"📁 Файл загружен: {filepath} ({size} байт)")
+        
         # Проверяем валидность
         if not db_manager.validate_backup(filepath):
             os.remove(filepath)
@@ -545,10 +626,14 @@ async def api_upload_db(request):
         
         # Создаем бекап текущей БД если запрошено
         data = await request.post()
-        if 'create_backup' in data and data['create_backup'] == 'on':
+        create_backup = data.get('create_backup', 'off') == 'on'
+        
+        if create_backup:
             db_manager.create_backup("before_upload_backup.db", send_to_admins=False)
+            print("✅ Бекап текущей БД создан")
         
         # Восстанавливаем БД
+        print(f"🔄 Восстанавливаю БД из {filepath}")
         success = db_manager.restore_from_backup(filepath)
         
         # Очищаем загруженный файл
@@ -556,32 +641,41 @@ async def api_upload_db(request):
             os.remove(filepath)
         
         if success:
+            print("✅ БД восстановлена успешно")
+            
             # Отправляем админам если запрошено
-            if 'send_to_admins' in data and data['send_to_admins'] == 'on':
-                await db_manager._send_backup_to_admins(db_manager.db_path)
+            send_to_admins = data.get('send_to_admins', 'off') == 'on'
+            if send_to_admins:
+                await send_backup_to_telegram(
+                    db_manager.db_path, 
+                    "🔄 Новая БД загружена через веб-панель"
+                )
             
             return web.json_response({
                 'success': True,
-                'message': 'БД успешно загружена и восстановлена',
+                'message': '✅ БД успешно загружена и восстановлена!\n⚠️ Перезапустите бота для применения изменений.',
+                'requires_restart': True,
                 'timestamp': datetime.now().isoformat()
             })
         else:
             return web.json_response({
                 'success': False,
-                'error': 'Ошибка восстановления БД'
+                'error': '❌ Ошибка восстановления БД'
             }, status=500)
             
     except Exception as e:
+        import traceback
+        traceback.print_exc()
         return web.json_response({
             'success': False,
-            'error': str(e)
+            'error': f'❌ Ошибка: {str(e)}'
         }, status=500)
 
 async def api_send_backup(request):
-    """Отправка бекапа в Telegram (старая версия для совместимости)"""
+    """Старая версия для совместимости"""
     file_name = request.query.get('file', '')
     return web.json_response({
         'success': True,
-        'message': f'Backup {file_name} sent to Telegram',
+        'message': f'Backup {file_name} будет отправлен',
         'timestamp': datetime.now().isoformat()
     })
