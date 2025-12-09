@@ -22,10 +22,16 @@ def setup_routes(app: web.Application):
         api_stats_handler,
         api_system_stats_handler,
         api_create_backup,
-        api_send_backup,
-        api_restore_backup,      # НОВОЕ
-        api_cleanup_backups,     # НОВОЕ
-        api_dbinfo               # НОВОЕ
+        api_restore_backup,
+        api_cleanup_backups,
+        api_dbinfo,
+        api_download_backup,
+        api_get_backup_info,
+        api_get_db_detailed_info,
+        api_send_to_admins,
+        api_send_current_db_to_admins,
+        api_upload_db,
+        api_send_backup
     )
     
     logger.info("📋 Регистрация маршрутов веб-панели...")
@@ -38,13 +44,6 @@ def setup_routes(app: web.Application):
     app.router.add_get('/users', users_handler)
     app.router.add_get('/settings', settings_handler)
     app.router.add_get('/logs', logs_handler)
-
-    app.router.add_get('/download_backup', download_backup)
-    app.router.add_post('/api/upload_db', upload_db_handler)
-    app.router.add_get('/api/send_to_admins', send_to_admins_handler)
-    app.router.add_get('/api/send_current_db_to_admins', send_current_db_to_admins_handler)
-    app.router.add_get('/api/get_backup_info', get_backup_info_handler)
-    app.router.add_get('/api/get_db_detailed_info', get_db_detailed_info_handler)
     
     # API endpoints
     app.router.add_get('/api/stats', api_stats_handler)
@@ -56,31 +55,15 @@ def setup_routes(app: web.Application):
     app.router.add_get('/api/restore_backup', api_restore_backup)
     app.router.add_get('/api/cleanup_backups', api_cleanup_backups)
     app.router.add_get('/api/dbinfo', api_dbinfo)
+    app.router.add_get('/api/download_backup', api_download_backup)
+    app.router.add_get('/api/get_backup_info', api_get_backup_info)
+    app.router.add_get('/api/get_db_detailed_info', api_get_db_detailed_info)
+    app.router.add_get('/api/send_to_admins', api_send_to_admins)
+    app.router.add_get('/api/send_current_db_to_admins', api_send_current_db_to_admins)
+    app.router.add_post('/api/upload_db', api_upload_db)
     
     # Legacy endpoints для совместимости
-    app.router.add_get('/download_backup', backups_handler)
-    app.router.add_get('/send_backup_to_telegram', backups_handler)
-    app.router.add_get('/create_backup', backups_handler)
+    app.router.add_get('/create_backup', api_create_backup)
+    app.router.add_get('/send_backup', api_send_backup)
     
     logger.info("✅ Все маршруты зарегистрированы")
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
