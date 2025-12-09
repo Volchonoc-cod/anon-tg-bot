@@ -33,7 +33,7 @@ def setup_directories():
         logger.info(f"📁 Создана директория: {directory}")
 
 def create_database_tables():
-    """Создает таблицы в базе данных (исправлено для избежания циклических импортов)"""
+    """Создает таблицы в базе данных"""
     try:
         # Импортируем engine из database
         from app.database import engine
@@ -105,21 +105,26 @@ async def initialize_bot_for_webhooks():
         storage = MemoryStorage()
         dp = Dispatcher(storage=storage)
         
-        # Регистрируем middleware
-        from aiogram.middleware.base import BaseMiddleware
-        from typing import Callable, Dict, Any, Awaitable
-        
-        class LoggingMiddleware(BaseMiddleware):
-            async def __call__(
-                self,
-                handler: Callable[[Any, Dict[str, Any]], Awaitable[Any]],
-                event: Any,
-                data: Dict[str, Any]
-            ) -> Any:
-                logger.debug(f"🔄 Middleware обработка: {event}")
-                return await handler(event, data)
-        
-        dp.update.middleware(LoggingMiddleware())
+        # Регистрируем middleware (исправленный импорт для aiogram 3.x)
+        try:
+            # Пробуем импорт для aiogram 3.x
+            from aiogram.middlewares.base import BaseMiddleware
+            from typing import Callable, Dict, Any, Awaitable
+            
+            class LoggingMiddleware(BaseMiddleware):
+                async def __call__(
+                    self,
+                    handler: Callable[[Any, Dict[str, Any]], Awaitable[Any]],
+                    event: Any,
+                    data: Dict[str, Any]
+                ) -> Any:
+                    logger.debug(f"🔄 Middleware обработка: {type(event).__name__}")
+                    return await handler(event, data)
+            
+            dp.update.middleware(LoggingMiddleware())
+            logger.info("✅ Middleware зарегистрирован")
+        except ImportError:
+            logger.warning("⚠️ Не удалось зарегистрировать middleware (возможно старая версия aiogram)")
         
         # Регистрируем роутеры
         logger.info("📋 Регистрация роутеров...")
@@ -138,9 +143,6 @@ async def initialize_bot_for_webhooks():
             dp.include_router(debug_router)
             
             logger.info("✅ Все роутеры зарегистрированы")
-            
-            # Проверяем, какие обработчики зарегистрированы
-            logger.info(f"📊 Зарегистрировано обработчиков: {len(dp.message.handlers)} сообщений, {len(dp.callback_query.handlers)} callback'ов")
             
         except Exception as e:
             logger.error(f"❌ Ошибка регистрации роутеров: {e}")
@@ -284,78 +286,6 @@ async def on_cleanup(app):
     await asyncio.sleep(1)
     logger.info("✅ Приложение остановлено")
 
-async def webhook_handler(request):
-    """Обработчик вебхуков от Telegram"""
-    try:
-        dp = request.app.get('dp')
-        bot = request.app.get('bot')
-        
-        if not dp or not bot:
-            logger.error("❌ Бот или диспетчер не инициализированы")
-            return web.Response(status=500, text="Bot not initialized")
-        
-        # Получаем обновление от Telegram
-        data = await request.json()
-        logger.debug(f"📩 Получен вебхук, update_id: {data.get('update_id')}")
-        
-        # Создаем объект Update из данных
-        from aiogram.types import Update
-        update = Update.model_validate(data)
-        
-        # Используем правильный метод для обработки
-        try:
-            # Вариант 1: через роутер (рекомендуется в aiogram 3.x)
-            await dp.feed_update(bot=bot, update=update)
-            
-            logger.debug(f"✅ Вебхук update_id={update.update_id} обработан успешно")
-            return web.Response(text="OK")
-            
-        except Exception as e:
-            logger.error(f"❌ Ошибка обработки обновления update_id={update.update_id}: {e}")
-            import traceback
-            traceback.print_exc()
-            return web.Response(status=500, text=str(e))
-        
-    except Exception as e:
-        logger.error(f"❌ Общая ошибка обработки вебхука: {e}")
-        import traceback
-        traceback.print_exc()
-        return web.Response(status=500, text=str(e))
-
-async def debug_webhook_handler(request):
-    """Отладочный обработчик вебхуков"""
-    try:
-        data = await request.json()
-        logger.info(f"🔍 DEBUG Webhook получен: {data}")
-        
-        # Пытаемся обработать
-        dp = request.app.get('dp')
-        bot = request.app.get('bot')
-        
-        if dp and bot:
-            from aiogram.types import Update
-            update = Update.model_validate(data)
-            
-            # Показываем что в диспетчере
-            logger.info(f"🔍 Диспетчер: {dp}")
-            logger.info(f"🔍 Бот: {bot}")
-            logger.info(f"🔍 Update: {update}")
-            
-            # Пробуем обработать
-            result = await dp.feed_update(bot=bot, update=update)
-            logger.info(f"🔍 Результат обработки: {result}")
-            
-            return web.Response(text="DEBUG OK")
-        else:
-            logger.error("🔍 Бот или диспетчер не найдены в app")
-            return web.Response(text="Bot not found", status=500)
-            
-    except Exception as e:
-        logger.error(f"🔍 DEBUG Ошибка: {e}")
-        import traceback
-        traceback.print_exc()
-        return web.Response(text=f"DEBUG ERROR: {str(e)}", status=500)
-
 async def simple_webhook_handler(request):
     """Простой обработчик вебхуков (минимальный)"""
     try:
@@ -389,20 +319,10 @@ async def simple_webhook_handler(request):
                 logger.error(f"❌ Ошибка aiogram для update_id={update_id}: {e}")
                 # Пробуем альтернативный метод
                 try:
-                    # Создаем update через pydantic
-                    from pydantic import TypeAdapter
-                    from aiogram.types import Update
-                    
-                    adapter = TypeAdapter(Update)
-                    update = adapter.validate_python(data)
-                    await dp.feed_update(bot=bot, update=update)
-                    logger.info(f"✅ Webhook update_id={update_id} обработан (альтернативный метод)")
+                    # Просто отвечаем OK если не удалось обработать
+                    logger.warning(f"⚠️ Пропускаем обработку update_id={update_id}")
                 except Exception as e2:
                     logger.error(f"❌ Альтернативный метод тоже не сработал: {e2}")
-                    # Сохраняем сырые данные для отладки
-                    import json
-                    with open(f'webhook_debug_{update_id}.json', 'w') as f:
-                        json.dump(data, f, indent=2)
         
         return web.Response(text="OK")
         
@@ -414,6 +334,43 @@ async def simple_webhook_handler(request):
         import traceback
         traceback.print_exc()
         return web.Response(text="Server Error", status=500)
+
+async def debug_webhook_handler(request):
+    """Отладочный обработчик вебхуков"""
+    try:
+        data = await request.json()
+        logger.info(f"🔍 DEBUG Webhook получен: update_id={data.get('update_id')}")
+        
+        # Пытаемся обработать
+        dp = request.app.get('dp')
+        bot = request.app.get('bot')
+        
+        if dp and bot:
+            from aiogram.types import Update
+            update = Update.model_validate(data)
+            
+            # Показываем что в диспетчере
+            logger.info(f"🔍 Диспетчер: {type(dp)}")
+            logger.info(f"🔍 Бот: {type(bot)}")
+            logger.info(f"🔍 Update тип: {type(update)}")
+            
+            # Пробуем обработать
+            try:
+                result = await dp.feed_update(bot=bot, update=update)
+                logger.info(f"🔍 Результат обработки: {result}")
+            except Exception as e:
+                logger.error(f"🔍 Ошибка обработки: {e}")
+            
+            return web.Response(text="DEBUG OK")
+        else:
+            logger.error("🔍 Бот или диспетчер не найдены в app")
+            return web.Response(text="Bot not found", status=500)
+            
+    except Exception as e:
+        logger.error(f"🔍 DEBUG Ошибка: {e}")
+        import traceback
+        traceback.print_exc()
+        return web.Response(text=f"DEBUG ERROR: {str(e)}", status=500)
 
 async def ping_handler(request):
     """Простой пинг-эндпоинт"""
@@ -438,6 +395,27 @@ async def health_handler(request):
 async def index_handler(request):
     """Главная страница"""
     bot = request.app.get('bot')
+    
+    # Исправленный JavaScript (без шаблонных строк)
+    js_script = """
+    <script>
+        // Обновляем аптайм каждую секунду
+        function updateUptime() {
+            const startTime = new Date("%s");
+            const now = new Date();
+            const diff = new Date(now - startTime);
+            
+            const hours = diff.getUTCHours().toString().padStart(2, '0');
+            const minutes = diff.getUTCMinutes().toString().padStart(2, '0');
+            const seconds = diff.getUTCSeconds().toString().padStart(2, '0');
+            
+            document.getElementById('uptime').textContent = hours + ':' + minutes + ':' + seconds;
+        }
+        
+        updateUptime();
+        setInterval(updateUptime, 1000);
+    </script>
+    """ % START_TIME.isoformat()
     
     html = f"""
     <!DOCTYPE html>
@@ -526,23 +504,7 @@ async def index_handler(request):
             </div>
         </div>
         
-        <script>
-            // Обновляем аптайм каждую секунду
-            function updateUptime() {{
-                const startTime = new Date("{START_TIME.isoformat()}");
-                const now = new Date();
-                const diff = new Date(now - startTime);
-                
-                const hours = diff.getUTCHours().toString().padStart(2, '0');
-                const minutes = diff.getUTCMinutes().toString().padStart(2, '0');
-                const seconds = diff.getUTCSeconds().toString().padStart(2, '0');
-                
-                document.getElementById('uptime').textContent = `${hours}:${minutes}:${seconds}`;
-            }}
-            
-            updateUptime();
-            setInterval(updateUptime, 1000);
-        </script>
+        {js_script}
     </body>
     </html>
     """
