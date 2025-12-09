@@ -75,7 +75,10 @@ async def backups_handler(request):
                     <button class="btn btn-danger" onclick="sendCurrentDbToAdmins()">
                         <i class="fas fa-share-alt"></i> Отправить текущую БД
                     </button>
-                    <button class="btn btn-primary" onclick="restartBot()" style="background: linear-gradient(135deg, var(--primary) 0%, #4f46e5 100%);">
+                    <button class="btn btn-primary" onclick="reconnectDatabase()" style="background: linear-gradient(135deg, var(--primary) 0%, #4f46e5 100%);">
+                        <i class="fas fa-plug"></i> Переподключить БД
+                    </button>
+                    <button class="btn btn-purple" onclick="restartBot()" style="background: linear-gradient(135deg, #8b5cf6 0%, #7c3aed 100%); color: white;">
                         <i class="fas fa-sync-alt"></i> Перезапустить бота
                     </button>
                 </div>
@@ -185,82 +188,38 @@ async def backups_handler(request):
                 <p>• Все бэкапы валидируются на корректность структуры</p>
                 <p>• Загруженные БД проверяются на валидность перед восстановлением</p>
                 <p>• Возможность отправки БД админам прямо из веб-панели</p>
-                <p>• После восстановления БД рекомендуется перезапустить бота кнопкой выше</p>
+                <p>• После восстановления БД используйте кнопку "Переподключить БД"</p>
+                <p>• Для полного обновления данных используйте кнопку "Перезапустить бота"</p>
             </div>
             
-            <!-- Модальное окно для информации о бэкапе -->
-            <div id="backupInfoModal" style="
-                display: none;
-                position: fixed;
-                top: 50%;
-                left: 50%;
-                transform: translate(-50%, -50%);
-                background: white;
-                padding: 30px;
-                border-radius: 20px;
-                box-shadow: 0 20px 60px rgba(0,0,0,0.3);
-                z-index: 1000;
-                max-width: 600px;
-                width: 90%;
-                max-height: 80vh;
-                overflow-y: auto;
-            ">
+            <!-- Модальные окна -->
+            <div id="backupInfoModal" style="display: none; position: fixed; top: 50%; left: 50%; transform: translate(-50%, -50%); background: white; padding: 30px; border-radius: 20px; box-shadow: 0 20px 60px rgba(0,0,0,0.3); z-index: 1000; max-width: 600px; width: 90%; max-height: 80vh; overflow-y: auto;">
                 <div style="display: flex; justify-content: space-between; align-items: center; margin-bottom: 20px;">
                     <h3><i class="fas fa-info-circle"></i> Информация о бэкапе</h3>
                     <button onclick="closeModal()" style="background: none; border: none; font-size: 1.5em; cursor: pointer; color: var(--danger);">
                         <i class="fas fa-times"></i>
                     </button>
                 </div>
-                <div id="backupInfoContent">
-                    <!-- Информация будет загружена здесь -->
-                </div>
+                <div id="backupInfoContent"></div>
                 <div style="text-align: center; margin-top: 20px;">
                     <button onclick="closeModal()" class="btn">Закрыть</button>
                 </div>
             </div>
             
-            <!-- Модальное окно для информации о БД -->
-            <div id="dbInfoModal" style="
-                display: none;
-                position: fixed;
-                top: 50%;
-                left: 50%;
-                transform: translate(-50%, -50%);
-                background: white;
-                padding: 30px;
-                border-radius: 20px;
-                box-shadow: 0 20px 60px rgba(0,0,0,0.3);
-                z-index: 1000;
-                max-width: 800px;
-                width: 90%;
-                max-height: 80vh;
-                overflow-y: auto;
-            ">
+            <div id="dbInfoModal" style="display: none; position: fixed; top: 50%; left: 50%; transform: translate(-50%, -50%); background: white; padding: 30px; border-radius: 20px; box-shadow: 0 20px 60px rgba(0,0,0,0.3); z-index: 1000; max-width: 800px; width: 90%; max-height: 80vh; overflow-y: auto;">
                 <div style="display: flex; justify-content: space-between; align-items: center; margin-bottom: 20px;">
                     <h3><i class="fas fa-chart-bar"></i> Детальная информация о БД</h3>
                     <button onclick="closeModal()" style="background: none; border: none; font-size: 1.5em; cursor: pointer; color: var(--danger);">
                         <i class="fas fa-times"></i>
                     </button>
                 </div>
-                <div id="dbInfoContent">
-                    <!-- Информация будет загружена здесь -->
-                </div>
+                <div id="dbInfoContent"></div>
                 <div style="text-align: center; margin-top: 20px;">
                     <button onclick="closeModal()" class="btn">Закрыть</button>
                 </div>
             </div>
             
-            <!-- Оверлей для модальных окон -->
-            <div id="modalOverlay" style="
-                display: none;
-                position: fixed;
-                top: 0;
-                left: 0;
-                right: 0;
-                bottom: 0;
-                background: rgba(0,0,0,0.5);
-                z-index: 999;
-            "></div>
+            <div id="modalOverlay" style="display: none; position: fixed; top: 0; left: 0; right: 0; bottom: 0; background: rgba(0,0,0,0.5); z-index: 999;"></div>
         </div>
         
         <script>
@@ -286,21 +245,31 @@ async def backups_handler(request):
         }}
         
         function restoreBackup(filename) {{
-            if (confirm(`Восстановить БД из бэкапа ${{filename}}?\\n\\nТекущая БД будет заменена!\\n⚠️ После восстановления рекомендуется перезапустить бота!`)) {{
+            if (confirm(`Восстановить БД из бэкапа ${{filename}}?\\n\\nТекущая БД будет заменена!\\n\\nПосле восстановления рекомендуется:\\n1. Переподключить БД\\n2. Перезапустить бота`)) {{
                 showLoading('Восстановление БД...');
                 fetch(`/api/restore_backup?file=${{encodeURIComponent(filename)}}`)
                     .then(response => response.json())
                     .then(data => {{
                         hideLoading();
                         if (data.success) {{
-                            const message = data.requires_restart 
-                                ? '✅ ' + data.message + '\\n⚠️ РЕКОМЕНДУЕТСЯ ПЕРЕЗАПУСТИТЬ БОТА!\\n\\nХотите перезапустить бота сейчас?'
-                                : '✅ ' + data.message;
+                            let message = '✅ ' + data.message;
+                            let actions = [];
                             
-                            if (data.requires_restart && confirm(message)) {{
-                                restartBot();
+                            if (data.db_reconnected) {{
+                                actions.push('✅ БД уже переподключена');
                             }} else {{
-                                alert('✅ ' + data.message);
+                                actions.push('❌ БД не переподключена автоматически');
+                            }}
+                            
+                            if (data.bot_restart_available) {{
+                                actions.push('🔄 Доступен перезапуск бота');
+                            }}
+                            
+                            message += '\\n\\n' + actions.join('\\n');
+                            message += '\\n\\nХотите перезапустить бота сейчас?';
+                            
+                            if (confirm(message)) {{
+                                restartBot();
                             }}
                         }} else {{
                             alert('❌ Ошибка: ' + data.error);
@@ -360,6 +329,48 @@ async def backups_handler(request):
             }}
         }}
         
+        function reconnectDatabase() {{
+            if (confirm('Переподключить базу данных?\\n\\nЭто обновит соединение с БД без перезапуска бота.\\nПолезно после восстановления БД.')) {{
+                showLoading('Переподключение БД...');
+                fetch('/api/reconnect_db')
+                    .then(response => response.json())
+                    .then(data => {{
+                        hideLoading();
+                        if (data.success) {{
+                            alert('✅ ' + data.message);
+                        }} else {{
+                            alert('❌ Ошибка: ' + data.error);
+                        }}
+                    }});
+            }}
+        }}
+        
+        function restartBot() {{
+            if (confirm('Перезапустить бота?\\n\\nБот будет остановлен и запущен заново.\\nЭто может занять 10-20 секунд.')) {{
+                showLoading('Перезапуск бота... Это может занять некоторое время');
+                fetch('/api/restart_bot')
+                    .then(response => response.json())
+                    .then(data => {{
+                        hideLoading();
+                        if (data.success) {{
+                            const before = data.bot_status_before;
+                            const after = data.bot_status_after;
+                            const message = `✅ Бот перезапущен успешно!\\n\\nСтатус до: ${{before.status}}\\nСтатус после: ${{after.status}}`;
+                            
+                            alert(message);
+                            // Обновляем страницу через 3 секунды
+                            setTimeout(() => location.reload(), 3000);
+                        }} else {{
+                            alert('❌ Ошибка: ' + data.error);
+                        }}
+                    }})
+                    .catch(error => {{
+                        hideLoading();
+                        alert('❌ Ошибка сети: ' + error);
+                    }});
+            }}
+        }}
+        
         function showBackupInfo(filename) {{
             showLoading('Загрузка информации...');
             fetch(`/api/get_backup_info?file=${{encodeURIComponent(filename)}}`)
@@ -388,32 +399,6 @@ async def backups_handler(request):
                         alert('❌ Ошибка: ' + data.error);
                     }}
                 }});
-        }}
-        
-        function restartBot() {{
-            if (confirm('Перезапустить бота?\\n\\nБот будет остановлен и запущен заново.\\nЭто может занять 10-20 секунд.')) {{
-                showLoading('Перезапуск бота... Это может занять некоторое время');
-                fetch('/api/restart_bot')
-                    .then(response => response.json())
-                    .then(data => {{
-                        hideLoading();
-                        if (data.success) {{
-                            const beforeStatus = data.status_before.status;
-                            const afterStatus = data.status_after.status;
-                            const message = `✅ Бот перезапущен успешно!\\n\\nСтатус до: ${{beforeStatus}}\\nСтатус после: ${{afterStatus}}`;
-                            
-                            alert(message);
-                            // Обновляем страницу через 3 секунды
-                            setTimeout(() => location.reload(), 3000);
-                        }} else {{
-                            alert('❌ Ошибка: ' + data.error);
-                        }}
-                    }})
-                    .catch(error => {{
-                        hideLoading();
-                        alert('❌ Ошибка сети: ' + error);
-                    }});
-            }}
         }}
         
         function showUploadForm() {{
@@ -485,7 +470,6 @@ async def backups_handler(request):
             `;
             document.body.appendChild(div);
             
-            // Добавляем стили для анимации
             if (!document.getElementById('loadingStyles')) {{
                 const style = document.createElement('style');
                 style.id = 'loadingStyles';
@@ -532,8 +516,11 @@ async def backups_handler(request):
                     
                     if (result.requires_restart) {{
                         setTimeout(() => {{
-                            const restartConfirm = confirm('✅ БД успешно загружена!\\n\\nТребуется перезапуск бота для применения изменений.\\n\\nПерезапустить бота сейчас?');
-                            if (restartConfirm) {{
+                            const message = '✅ БД успешно загружена!\\n\\n' + 
+                                          (result.db_reconnected ? '✅ БД переподключена' : '❌ БД не переподключена') + '\\n' +
+                                          '\\nПерезапустить бота сейчас?';
+                            
+                            if (confirm(message)) {{
                                 restartBot();
                             }} else {{
                                 location.reload();
