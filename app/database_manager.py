@@ -10,8 +10,6 @@ from datetime import datetime, timedelta
 import logging
 from typing import Optional, List, Dict, Any
 import traceback
-from aiogram import Bot
-from aiogram.types import FSInputFile
 import time
 
 logger = logging.getLogger(__name__)
@@ -20,11 +18,11 @@ logger = logging.getLogger(__name__)
 class DatabaseManager:
     """Класс для управления базой данных с бэкапами"""
     
-    def __init__(self, db_path: str = None, bot: Bot = None):
-        self.bot = bot
+    def __init__(self, db_path: str = None):
         self.db_path = self._find_or_create_db(db_path)
         self.backup_dir = 'backups'
         self.metadata_file = 'data/db_metadata.json'
+        self.bot = None  # Будет установлен позже
         
         # Создаем необходимые директории
         os.makedirs(os.path.dirname(self.db_path), exist_ok=True)
@@ -43,9 +41,10 @@ class DatabaseManager:
         # Флаг инициализации
         self._initialized = False
     
-    def set_bot(self, bot: Bot):
+    def set_bot(self, bot):
         """Установить бота для отправки уведомлений"""
         self.bot = bot
+        logger.info(f"✅ Бот установлен для менеджера БД")
     
     def _find_or_create_db(self, db_path: str = None) -> str:
         """Найти существующую БД или определить путь для новой"""
@@ -254,6 +253,8 @@ class DatabaseManager:
                 f"💡 Для восстановления используйте команду:\n"
                 f"<code>/restore_{os.path.basename(backup_path).replace('.db', '')}</code>"
             )
+            
+            from aiogram.types import FSInputFile
             
             for admin_id in ADMIN_IDS:
                 try:
@@ -585,7 +586,7 @@ class DatabaseManager:
             return False
     
     def import_from_sql(self, sql_file: str) -> bool:
-        """Импорт базы данных из SQL файла"""
+        """Импорт базы данных из SQL файл"""
         try:
             if not os.path.exists(sql_file):
                 logger.error(f"❌ SQL файл не найден: {sql_file}")
@@ -690,7 +691,7 @@ db_manager = DatabaseManager()
 # Инициализация при импорте
 _db_initialized = False
 
-def init_database_manager(bot: Bot = None) -> bool:
+def init_database_manager(bot = None) -> bool:
     """Инициализация менеджера БД при запуске"""
     global _db_initialized
     
