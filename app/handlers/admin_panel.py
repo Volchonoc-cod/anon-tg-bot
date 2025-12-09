@@ -287,22 +287,176 @@ async def cmd_exportdb(message: Message):
         await message.answer(f"❌ Ошибка экспорта: {str(e)}")
 
 
+# ==================== ЗАГРУЗКА БАЗЫ ДАННЫХ ====================
 
+@router.message(F.document, admin_filter)
+async def handle_database_upload(message: types.Message):
+    """Обработка загрузки базы данных"""
+    if not is_admin(message.from_user.id):
+        return
 
+    document = message.document
+    
+    # Проверяем что это файл базы данных
+    if not document.file_name.endswith('.db'):
+        await message.answer("❌ Можно загружать только файлы баз данных (.db)")
+        return
+    
+    # Лимит размера файла (100MB)
+    MAX_SIZE = 100 * 1024 * 1024
+    if document.file_size > MAX_SIZE:
+        await message.answer(f"❌ Файл слишком большой. Максимальный размер: {MAX_SIZE // (1024*1024)}MB")
+        return
+    
+    await message.answer("💾 Загружаю файл базы данных...")
+    
+    try:
+        # Создаем директорию для загрузок
+        upload_dir = 'uploads'
+        os.makedirs(upload_dir, exist_ok=True)
+        
+        # Скачиваем файл
+        file_path = os.path.join(upload_dir, document.file_name)
+        
+        from aiogram import Bot
+        bot = Bot.get_current()
+        file = await bot.get_file(document.file_id)
+        await bot.download_file(file.file_path, file_path)
+        
+        # Проверяем валидность базы данных
+        if not db_manager.validate_backup(file_path):
+            os.remove(file_path)
+            await message.answer("❌ Файл не является валидной базой данных SQLite")
+            return
+        
+        # Спрашиваем подтверждение
+        file_size_mb = document.file_size / (1024 * 1024)
+        
+        await message.answer(
+            f"📁 <b>Файл загружен:</b>\n\n"
+            f"📦 Имя: <code>{document.file_name}</code>\n"
+            f"📊 Размер: {file_size_mb:.2f} MB\n\n"
+            f"⚠️ <b>Внимание:</b> Текущая база данных будет заменена!\n\n"
+            f"Подтвердите восстановление:",
+            parse_mode="HTML",
+            reply_markup=types.InlineKeyboardMarkup(
+                inline_keyboard=[
+                    [
+                        types.InlineKeyboardButton(
+                            text="✅ Восстановить", 
+                            callback_data=f"confirm_restore_{document.file_name}"
+                        ),
+                        types.InlineKeyboardButton(
+                            text="❌ Отмена", 
+                            callback_data="cancel_restore"
+                        )
+                    ]
+                ]
+            )
+        )
+        
+    except Exception as e:
+        logger.error(f"❌ Ошибка загрузки файла: {e}")
+        await message.answer(f"❌ Ошибка загрузки файла: {str(e)[:200]}")
 
+@router.callback_query(F.data.startswith("confirm_restore_"))
+async def confirm_restore_database(callback: types.CallbackQuery):
+    """Подтверждение восстановления из загруженного файла"""
+    if not is_admin(callback.from_user.id):
+        await callback.answer("❌ Доступ запрещен")
+        return
 
+    file_name = callback.data.replace("confirm_restore_", "")
+    file_path = os.path.join('uploads', file_name)
+    
+    if not os.path.exists(file_path):
+        await callback.answer("❌ Файл не найден")
+        return
+    
+    await callback.answer("🔄 Начинаю восстановление...")
+    
+    try:
+        # Создаем бэкап текущей БД
+        await callback.message.answer("💾 Создаю резервную копию текущей БД...")
+        current_backup = db_manager.create_backup("before_upload_backup.db", send_to_admins=False)
+        
+        if current_backup:
+            await callback.message.answer(f"✅ Текущая БД сохранена: {os.path.basename(current_backup)}")
+        
+        # Восстанавливаем из загруженного файла
+        await callback.message.answer("🔄 Восстанавливаю базу данных...")
+        
+        success = db_manager.restore_from_backup(file_path)
+        
+        if success:
+            # Отправляем новую БД админу
+            db_info = db_manager.get_db_info()
+            
+            # Создаем бэкап восстановленной БД
+            new_backup = db_manager.create_backup("after_restore_backup.db")
+            
+            await callback.message.answer(
+                f"✅ <b>База данных успешно восстановлена!</b>\n\n"
+                f"📁 Из файла: <code>{file_name}</code>\n"
+                f"📊 Размер: {db_info.get('size_mb', 0):.2f} MB\n"
+                f"📂 Таблиц: {len(db_info.get('tables', []))}\n"
+                f"📝 Записей: {db_info.get('total_records', 0)}\n\n"
+                f"🔄 <b>Перезапустите бота для применения изменений!</b>",
+                parse_mode="HTML"
+            )
+            
+            # Отправляем файл БД
+            try:
+                from app.config import ADMIN_IDS
+                bot = Bot.get_current()
+                
+                for admin_id in ADMIN_IDS:
+                    await bot.send_document(
+                        chat_id=admin_id,
+                        document=FSInputFile(db_manager.db_path),
+                        caption=f"📁 Восстановленная база данных\n⏰ {datetime.now().strftime('%H:%M:%S')}"
+                    )
+            except Exception as e:
+                logger.error(f"❌ Ошибка отправки БД: {e}")
+            
+        else:
+            await callback.message.answer("❌ Ошибка восстановления базы данных")
+        
+        # Удаляем загруженный файл
+        if os.path.exists(file_path):
+            os.remove(file_path)
+        
+    except Exception as e:
+        logger.error(f"❌ Ошибка восстановления: {e}")
+        await callback.message.answer(f"❌ Ошибка восстановления: {str(e)[:200]}")
+    finally:
+        await callback.answer()
 
+@router.callback_query(F.data == "cancel_restore")
+async def cancel_restore_database(callback: types.CallbackQuery):
+    """Отмена восстановления"""
+    if not is_admin(callback.from_user.id):
+        await callback.answer("❌ Доступ запрещен")
+        return
+    
+    await callback.message.answer("❌ Восстановление отменено")
+    await callback.answer()
 
-
-
-
-
-
-
-
-
-
-
+@router.message(Command("upload_db"), admin_filter)
+async def upload_db_command(message: types.Message):
+    """Инструкция по загрузке базы данных"""
+    await message.answer(
+        "📁 <b>Загрузка базы данных</b>\n\n"
+        "Для загрузки новой базы данных:\n"
+        "1. Отправьте мне файл <code>.db</code>\n"
+        "2. Подтвердите восстановление\n"
+        "3. Перезапустите бота\n\n"
+        "⚠️ <b>Внимание:</b>\n"
+        "• Текущая БД будет заменена\n"
+        "• Создается резервная копия\n"
+        "• Максимальный размер файла: 100MB",
+        parse_mode="HTML"
+    )
 
 # ==================== ИСПРАВЛЕННЫЕ ОБРАБОТЧИКИ ЦЕН ====================
 
