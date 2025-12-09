@@ -60,9 +60,9 @@ async def backups_handler(request):
             <div style="display: flex; justify-content: space-between; align-items: center; margin-bottom: 30px;">
                 <h2><i class="fas fa-database"></i> Управление базой данных</h2>
                 <div style="display: flex; gap: 10px; flex-wrap: wrap;">
-                    <a href="/api/create_backup" class="btn btn-success">
+                    <button class="btn btn-success" onclick="createNewBackup()">
                         <i class="fas fa-plus"></i> Создать бекап
-                    </a>
+                    </button>
                     <button class="btn btn-warning" onclick="cleanupBackups()">
                         <i class="fas fa-broom"></i> Очистить старые
                     </button>
@@ -260,15 +260,36 @@ async def backups_handler(request):
         </div>
         
         <script>
+        function createNewBackup() {{
+            if (confirm('Создать новый бекап базы данных?')) {{
+                showLoading('Создание бекапа...');
+                fetch('/api/create_backup')
+                    .then(response => response.json())
+                    .then(data => {{
+                        hideLoading();
+                        if (data.success) {{
+                            alert(`✅ Бекап создан: ${{data.backup_name}}\\n📊 Размер: ${{data.size_mb.toFixed(2)}} MB\\n📤 Отправлено: ${{data.telegram_sent}}/${{data.telegram_total}} админам`);
+                            location.reload();
+                        }} else {{
+                            alert('❌ Ошибка: ' + data.error);
+                        }}
+                    }})
+                    .catch(error => {{
+                        hideLoading();
+                        alert('❌ Ошибка сети: ' + error);
+                    }});
+            }}
+        }}
+        
         function restoreBackup(filename) {{
-            if (confirm(`Восстановить БД из бэкапа ${{filename}}?\\n\\nТекущая БД будет заменена!`)) {{
+            if (confirm(`Восстановить БД из бэкапа ${{filename}}?\\n\\nТекущая БД будет заменена!\\n⚠️ ПЕРЕЗАПУСТИТЕ БОТА ПОСЛЕ ЭТОГО!`)) {{
                 showLoading('Восстановление БД...');
                 fetch(`/api/restore_backup?file=${{encodeURIComponent(filename)}}`)
                     .then(response => response.json())
                     .then(data => {{
                         hideLoading();
                         if (data.success) {{
-                            alert('✅ БД восстановлена! Перезапустите приложение для применения изменений.');
+                            alert('✅ ' + data.message + '\\n⚠️ ПЕРЕЗАПУСТИТЕ БОТА ДЛЯ ПРИМЕНЕНИЯ ИЗМЕНЕНИЙ!');
                         }} else {{
                             alert('❌ Ошибка: ' + data.error);
                         }}
@@ -303,7 +324,7 @@ async def backups_handler(request):
                     .then(data => {{
                         hideLoading();
                         if (data.success) {{
-                            alert(`✅ Отправлено ${{data.sent}}/${{data.total}} админам`);
+                            alert(`✅ ${{data.message}}`);
                         }} else {{
                             alert('❌ Ошибка: ' + data.error);
                         }}
@@ -319,7 +340,7 @@ async def backups_handler(request):
                     .then(data => {{
                         hideLoading();
                         if (data.success) {{
-                            alert(`✅ Отправлено ${{data.sent}}/${{data.total}} админам`);
+                            alert(`✅ ${{data.message}}`);
                         }} else {{
                             alert('❌ Ошибка: ' + data.error);
                         }}
@@ -379,12 +400,59 @@ async def backups_handler(request):
         }}
         
         function showLoading(message) {{
-            // Можно добавить реализацию loading overlay
-            console.log('Loading:', message);
+            // Простая реализация загрузки
+            const loadingEl = document.getElementById('loadingOverlay') || createLoadingOverlay();
+            loadingEl.style.display = 'flex';
+            loadingEl.querySelector('.loading-text').textContent = message;
         }}
         
         function hideLoading() {{
-            console.log('Loading hidden');
+            const loadingEl = document.getElementById('loadingOverlay');
+            if (loadingEl) loadingEl.style.display = 'none';
+        }}
+        
+        function createLoadingOverlay() {{
+            const div = document.createElement('div');
+            div.id = 'loadingOverlay';
+            div.style.cssText = `
+                position: fixed;
+                top: 0;
+                left: 0;
+                right: 0;
+                bottom: 0;
+                background: rgba(0,0,0,0.7);
+                display: none;
+                justify-content: center;
+                align-items: center;
+                z-index: 9999;
+                flex-direction: column;
+                color: white;
+                font-size: 1.2em;
+            `;
+            div.innerHTML = `
+                <div class="spinner" style="
+                    border: 4px solid rgba(255,255,255,0.3);
+                    border-radius: 50%;
+                    border-top: 4px solid white;
+                    width: 50px;
+                    height: 50px;
+                    animation: spin 1s linear infinite;
+                    margin-bottom: 15px;
+                "></div>
+                <div class="loading-text"></div>
+            `;
+            document.body.appendChild(div);
+            
+            const style = document.createElement('style');
+            style.textContent = `
+                @keyframes spin {{
+                    0% {{ transform: rotate(0deg); }}
+                    100% {{ transform: rotate(360deg); }}
+                }}
+            `;
+            document.head.appendChild(style);
+            
+            return div;
         }}
         
         // Обработка формы загрузки БД
@@ -414,12 +482,12 @@ async def backups_handler(request):
                 
                 if (result.success) {{
                     progressBar.style.width = '100%';
-                    uploadStatus.textContent = '✅ БД успешно загружена!';
+                    uploadStatus.textContent = '✅ ' + result.message;
                     setTimeout(() => {{
                         location.reload();
                     }}, 2000);
                 }} else {{
-                    uploadStatus.textContent = '❌ Ошибка: ' + result.error;
+                    uploadStatus.textContent = '❌ ' + result.error;
                     progressBar.style.width = '100%';
                 }}
             }} catch (error) {{
