@@ -38,6 +38,13 @@ def setup_routes(app: web.Application):
     app.router.add_get('/users', users_handler)
     app.router.add_get('/settings', settings_handler)
     app.router.add_get('/logs', logs_handler)
+
+    app.router.add_get('/download_backup', download_backup)
+    app.router.add_post('/api/upload_db', upload_db_handler)
+    app.router.add_get('/api/send_to_admins', send_to_admins_handler)
+    app.router.add_get('/api/send_current_db_to_admins', send_current_db_to_admins_handler)
+    app.router.add_get('/api/get_backup_info', get_backup_info_handler)
+    app.router.add_get('/api/get_db_detailed_info', get_db_detailed_info_handler)
     
     # API endpoints
     app.router.add_get('/api/stats', api_stats_handler)
