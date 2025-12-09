@@ -2,7 +2,7 @@ import os
 from sqlalchemy import create_engine
 from sqlalchemy.ext.declarative import declarative_base
 from sqlalchemy.orm import sessionmaker
-
+from .models import Base
 # Путь к базе данных в папке data
 BASE_DIR = os.path.dirname(os.path.abspath(__file__))
 DATA_DIR = os.path.join(BASE_DIR, 'data')
@@ -30,3 +30,13 @@ def get_db():
 
 def create_tables():
     Base.metadata.create_all(bind=engine)
+
+def create_tables():
+    """Создает все таблицы в базе данных"""
+    try:
+        Base.metadata.create_all(bind=engine)
+        logger.info("✅ Таблицы БД созданы/проверены")
+        return True
+    except Exception as e:
+        logger.error(f"❌ Ошибка создания таблиц БД: {e}")
+        return False
