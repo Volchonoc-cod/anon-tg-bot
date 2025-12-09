@@ -38,6 +38,29 @@ def setup_directories():
         os.makedirs(directory, exist_ok=True)
         logger.info(f"📁 Создана директория: {directory}")
 
+def create_database_tables():
+    """Создает таблицы в базе данных (исправлено для избежания циклических импортов)"""
+    try:
+        # Импортируем engine из database
+        from app.database import engine
+        from app.models import Base
+        
+        # Создаем все таблицы
+        Base.metadata.create_all(bind=engine)
+        
+        # Проверяем таблицы
+        from sqlalchemy import inspect
+        inspector = inspect(engine)
+        tables = inspector.get_table_names()
+        
+        logger.info(f"📊 Таблицы в БД созданы: {tables}")
+        return True
+    except Exception as e:
+        logger.error(f"❌ Ошибка создания таблиц БД: {e}")
+        import traceback
+        traceback.print_exc()
+        return False
+
 async def initialize_bot():
     """Инициализация бота - вызывается только один раз"""
     global _bot_initialized, _bot_instance, _dp_instance
@@ -65,20 +88,11 @@ async def initialize_bot():
         logger.info(f"✅ Render: {IS_RENDER}")
         
         # 3. Создаем таблицы БД
-        from app.database import Base, engine
         logger.info("🔄 Создание таблиц БД...")
-        try:
-            Base.metadata.create_all(bind=engine)
-            
-            # Проверяем таблицы
-            from sqlalchemy import inspect
-            inspector = inspect(engine)
-            tables = inspector.get_table_names()
-            logger.info(f"📊 Таблицы в БД: {tables}")
-        except Exception as e:
-            logger.error(f"❌ Ошибка создания таблиц БД: {e}")
-            import traceback
-            traceback.print_exc()
+        if create_database_tables():
+            logger.info("✅ Таблицы БД созданы успешно")
+        else:
+            logger.error("❌ Не удалось создать таблицы БД, продолжаем работу...")
         
         # 4. Инициализируем менеджер БД ПОСЛЕ создания таблиц
         logger.info("💾 Инициализация менеджера БД...")
@@ -131,22 +145,6 @@ async def initialize_bot():
         bot_info = await bot.get_me()
         logger.info(f"✅ Bot: @{bot_info.username} ({bot_info.first_name})")
         
-        # 8. Отправляем уведомление админам (только при поллинге или первом запуске)
-        try:
-            from app.database_manager import db_manager
-            db_info = db_manager.get_db_info()
-            backup_count = len(db_manager.list_backups())
-        except:
-            db_info = {"size_mb": 0}
-            backup_count = 0
-        
-        # Сохраняем информацию о боте для использования
-        bot_info_dict = {
-            "username": bot_info.username,
-            "first_name": bot_info.first_name,
-            "id": bot_info.id
-        }
-        
         return bot, dp
         
     except Exception as e:
@@ -159,19 +157,28 @@ async def notify_admins_on_startup(bot, is_webhook=False):
     """Отправляет уведомление администраторам о запуске"""
     try:
         from app.config import ADMIN_IDS
-        from app.database_manager import db_manager
-        
-        db_info = db_manager.get_db_info()
-        backup_count = len(db_manager.list_backups())
         
         mode = "вебхуки" if is_webhook else "поллинг"
+        bot_info = await bot.get_me()
+        
+        # Получаем информацию о БД
+        db_size = 0
+        backup_count = 0
+        try:
+            from app.database_manager import db_manager
+            db_info = db_manager.get_db_info()
+            db_size = db_info.get('size_mb', 0)
+            backup_count = len(db_manager.list_backups())
+        except:
+            pass
+        
         message = (
             f"🚀 <b>Бот запущен ({mode})!</b>\n\n"
-            f"🤖 @{bot.username}\n"
+            f"🤖 @{bot_info.username}\n"
             f"⏰ {datetime.now().strftime('%d.%m.%Y %H:%M')}\n"
             f"🌐 Режим: {mode}\n"
             f"👥 Админов: {len(ADMIN_IDS)}\n"
-            f"💾 БД: {db_info.get('size_mb', 0):.2f} MB\n"
+            f"💾 БД: {db_size:.2f} MB\n"
             f"📂 Бэкапов: {backup_count}\n"
             f"📝 /backup - создать бэкап\n"
             f"📋 /backups - список бэкапов"
@@ -188,7 +195,7 @@ async def run_polling():
         bot, dp = await initialize_bot()
         
         # Отправляем уведомление о запуске
-        await notify_admins_on_startup(await bot.get_me(), is_webhook=False)
+        await notify_admins_on_startup(bot, is_webhook=False)
         
         # Удаляем вебхук если был
         await bot.delete_webhook(drop_pending_updates=True)
@@ -229,7 +236,7 @@ async def run_webhook_mode():
         bot, dp = await initialize_bot()
         
         # Отправляем уведомление о запуске
-        await notify_admins_on_startup(await bot.get_me(), is_webhook=True)
+        await notify_admins_on_startup(bot, is_webhook=True)
         
         logger.info("✅ Бот инициализирован для вебхуков")
         logger.info("📡 Ожидаю обновления через вебхуки...")
@@ -246,9 +253,10 @@ async def run_webhook_mode():
 
 async def run_bot():
     """Основная функция запуска бота - определяет режим работы"""
-    from app.config import IS_RENDER
+    # Проверяем, запущен ли бот на Render
+    is_render = os.getenv('RENDER', '').lower() == 'true'
     
-    if IS_RENDER:
+    if is_render:
         # На Render используем режим ожидания вебхуков
         logger.info("🌐 Обнаружен Render, использую режим вебхуков")
         await run_webhook_mode()
@@ -286,7 +294,7 @@ def main():
     """Точка входа - для запуска бота отдельно (не из Render)"""
     # Настройка обработчиков сигналов
     signal.signal(signal.SIGINT, handle_shutdown)
-    signal.signal(signal.SIGTERM, handle_shutdown)
+    signal.signal(signal.SIGTERM, signal_handler=handle_shutdown)
     
     try:
         asyncio.run(run_bot())
