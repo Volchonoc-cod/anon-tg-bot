@@ -9,7 +9,7 @@ logger = logging.getLogger(__name__)
 def setup_routes(app: web.Application):
     """Настройка всех маршрутов"""
     
-    # Импортируем обработчики
+    # Импортируем обработчики страниц
     from web.handlers.main import index_handler
     from web.handlers.backups import backups_handler
     from web.handlers.monitor import monitor_handler
@@ -17,7 +17,7 @@ def setup_routes(app: web.Application):
     from web.handlers.settings import settings_handler
     from web.handlers.logs import logs_handler
     
-    # API маршруты
+    # Импортируем API обработчики
     from web.handlers.api import (
         api_stats_handler,
         api_system_stats_handler,
@@ -32,8 +32,11 @@ def setup_routes(app: web.Application):
         api_send_current_db_to_admins,
         api_upload_db,
         api_send_backup,
-        api_restart_bot,      # НОВЫЙ
-        api_bot_status        # НОВЫЙ
+        # Новые API
+        api_reconnect_db,
+        api_check_db_connection,
+        api_restart_bot,
+        api_bot_status
     )
     
     logger.info("📋 Регистрация маршрутов веб-панели...")
@@ -47,13 +50,12 @@ def setup_routes(app: web.Application):
     app.router.add_get('/settings', settings_handler)
     app.router.add_get('/logs', logs_handler)
     
-    # API endpoints
+    # API endpoints (статистика)
     app.router.add_get('/api/stats', api_stats_handler)
     app.router.add_get('/api/system_stats', api_system_stats_handler)
-    app.router.add_get('/api/create_backup', api_create_backup)
-    app.router.add_get('/api/send_backup', api_send_backup)
     
-    # Новые API endpoints для менеджера БД
+    # API endpoints (бэкапы)
+    app.router.add_get('/api/create_backup', api_create_backup)
     app.router.add_get('/api/restore_backup', api_restore_backup)
     app.router.add_get('/api/cleanup_backups', api_cleanup_backups)
     app.router.add_get('/api/dbinfo', api_dbinfo)
@@ -63,8 +65,11 @@ def setup_routes(app: web.Application):
     app.router.add_get('/api/send_to_admins', api_send_to_admins)
     app.router.add_get('/api/send_current_db_to_admins', api_send_current_db_to_admins)
     app.router.add_post('/api/upload_db', api_upload_db)
+    app.router.add_get('/api/send_backup', api_send_backup)
     
-    # API для управления ботом
+    # API endpoints (управление)
+    app.router.add_get('/api/reconnect_db', api_reconnect_db)
+    app.router.add_get('/api/check_db_connection', api_check_db_connection)
     app.router.add_get('/api/restart_bot', api_restart_bot)
     app.router.add_get('/api/bot_status', api_bot_status)
     
