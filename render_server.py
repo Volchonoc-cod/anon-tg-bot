@@ -4,6 +4,7 @@ ShadowTalk - Веб-панель управления ботом с поддер
 """
 import os
 import sys
+import json
 import asyncio
 import logging
 import aiohttp
@@ -80,7 +81,7 @@ async def initialize_bot_for_webhooks():
         
         if not WEBHOOK_URL:
             logger.warning("⚠️ RENDER_EXTERNAL_URL не установлен, вебхуки отключены")
-            return None
+            return None, None
         
         # Инициализируем менеджер БД
         logger.info("💾 Инициализация менеджера БД...")
@@ -99,7 +100,26 @@ async def initialize_bot_for_webhooks():
         from aiogram.fsm.storage.memory import MemoryStorage
         
         bot = Bot(token=BOT_TOKEN)
-        dp = Dispatcher(storage=MemoryStorage())
+        
+        # ВАЖНО: Создаем хранилище для состояний
+        storage = MemoryStorage()
+        dp = Dispatcher(storage=storage)
+        
+        # Регистрируем middleware
+        from aiogram.middleware.base import BaseMiddleware
+        from typing import Callable, Dict, Any, Awaitable
+        
+        class LoggingMiddleware(BaseMiddleware):
+            async def __call__(
+                self,
+                handler: Callable[[Any, Dict[str, Any]], Awaitable[Any]],
+                event: Any,
+                data: Dict[str, Any]
+            ) -> Any:
+                logger.debug(f"🔄 Middleware обработка: {event}")
+                return await handler(event, data)
+        
+        dp.update.middleware(LoggingMiddleware())
         
         # Регистрируем роутеры
         logger.info("📋 Регистрация роутеров...")
@@ -110,15 +130,22 @@ async def initialize_bot_for_webhooks():
             from app.handlers.anon_handlers import router as anon_router
             from app.handlers.debug_handlers import router as debug_router
             
+            # Подключаем роутеры в правильном порядке
             dp.include_router(main_router)
-            dp.include_router(admin_router)
             dp.include_router(payment_router)
             dp.include_router(anon_router)
+            dp.include_router(admin_router)
             dp.include_router(debug_router)
             
             logger.info("✅ Все роутеры зарегистрированы")
+            
+            # Проверяем, какие обработчики зарегистрированы
+            logger.info(f"📊 Зарегистрировано обработчиков: {len(dp.message.handlers)} сообщений, {len(dp.callback_query.handlers)} callback'ов")
+            
         except Exception as e:
             logger.error(f"❌ Ошибка регистрации роутеров: {e}")
+            import traceback
+            traceback.print_exc()
             raise
         
         # Получаем информацию о боте
@@ -127,19 +154,24 @@ async def initialize_bot_for_webhooks():
         
         # Устанавливаем вебхук
         webhook_url = f"{WEBHOOK_URL.rstrip('/')}{WEBHOOK_PATH}"
+        
+        # Удаляем старый вебхук если был
+        try:
+            await bot.delete_webhook(drop_pending_updates=True)
+            logger.info("✅ Старый вебхук удален")
+        except Exception as e:
+            logger.warning(f"⚠️ Не удалось удалить старый вебхук: {e}")
+        
+        # Устанавливаем новый вебхук
         await bot.set_webhook(webhook_url)
         logger.info(f"✅ Вебхук установлен: {webhook_url}")
         
-        # Отправляем уведомление админам
+        # Отправляем тестовое сообщение админам
         try:
             from app.database_manager import db_manager
             db_info = db_manager.get_db_info()
             backup_count = len(db_manager.list_backups())
-        except:
-            db_info = {"size_mb": 0}
-            backup_count = 0
-        
-        try:
+            
             message = (
                 f"🚀 <b>Бот запущен на Render через вебхуки!</b>\n\n"
                 f"🤖 @{bot_info.username}\n"
@@ -147,12 +179,14 @@ async def initialize_bot_for_webhooks():
                 f"🌐 Вебхук: {webhook_url}\n"
                 f"👥 Админов: {len(ADMIN_IDS)}\n"
                 f"💾 БД: {db_info.get('size_mb', 0):.2f} MB\n"
-                f"📂 Бэкапов: {backup_count}\n"
-                f"📝 /backup - создать бэкап"
+                f"📂 Бэкапов: {backup_count}\n\n"
+                f"✅ Готов к работе!"
             )
             
             for admin_id in ADMIN_IDS:
                 await bot.send_message(admin_id, message, parse_mode="HTML")
+                logger.info(f"📨 Уведомление отправлено админу {admin_id}")
+                
         except Exception as e:
             logger.error(f"❌ Ошибка отправки уведомления: {e}")
         
@@ -257,18 +291,129 @@ async def webhook_handler(request):
         bot = request.app.get('bot')
         
         if not dp or not bot:
+            logger.error("❌ Бот или диспетчер не инициализированы")
             return web.Response(status=500, text="Bot not initialized")
         
         # Получаем обновление от Telegram
         data = await request.json()
+        logger.debug(f"📩 Получен вебхук, update_id: {data.get('update_id')}")
         
-        # Обрабатываем обновление через aiogram
-        update = await dp.feed_update(bot, data)
+        # Создаем объект Update из данных
+        from aiogram.types import Update
+        update = Update.model_validate(data)
+        
+        # Используем правильный метод для обработки
+        try:
+            # Вариант 1: через роутер (рекомендуется в aiogram 3.x)
+            await dp.feed_update(bot=bot, update=update)
+            
+            logger.debug(f"✅ Вебхук update_id={update.update_id} обработан успешно")
+            return web.Response(text="OK")
+            
+        except Exception as e:
+            logger.error(f"❌ Ошибка обработки обновления update_id={update.update_id}: {e}")
+            import traceback
+            traceback.print_exc()
+            return web.Response(status=500, text=str(e))
+        
+    except Exception as e:
+        logger.error(f"❌ Общая ошибка обработки вебхука: {e}")
+        import traceback
+        traceback.print_exc()
+        return web.Response(status=500, text=str(e))
+
+async def debug_webhook_handler(request):
+    """Отладочный обработчик вебхуков"""
+    try:
+        data = await request.json()
+        logger.info(f"🔍 DEBUG Webhook получен: {data}")
+        
+        # Пытаемся обработать
+        dp = request.app.get('dp')
+        bot = request.app.get('bot')
+        
+        if dp and bot:
+            from aiogram.types import Update
+            update = Update.model_validate(data)
+            
+            # Показываем что в диспетчере
+            logger.info(f"🔍 Диспетчер: {dp}")
+            logger.info(f"🔍 Бот: {bot}")
+            logger.info(f"🔍 Update: {update}")
+            
+            # Пробуем обработать
+            result = await dp.feed_update(bot=bot, update=update)
+            logger.info(f"🔍 Результат обработки: {result}")
+            
+            return web.Response(text="DEBUG OK")
+        else:
+            logger.error("🔍 Бот или диспетчер не найдены в app")
+            return web.Response(text="Bot not found", status=500)
+            
+    except Exception as e:
+        logger.error(f"🔍 DEBUG Ошибка: {e}")
+        import traceback
+        traceback.print_exc()
+        return web.Response(text=f"DEBUG ERROR: {str(e)}", status=500)
+
+async def simple_webhook_handler(request):
+    """Простой обработчик вебхуков (минимальный)"""
+    try:
+        # Получаем данные
+        data = await request.json()
+        update_id = data.get('update_id', 'unknown')
+        logger.info(f"📩 Webhook update_id={update_id} получен")
+        
+        # Проверяем тип обновления
+        if 'message' in data:
+            logger.info(f"📨 Сообщение от {data['message'].get('from', {}).get('id')}")
+        elif 'callback_query' in data:
+            logger.info(f"🔘 Callback от {data['callback_query'].get('from', {}).get('id')}")
+        
+        # Пытаемся обработать через диспетчер
+        dp = request.app.get('dp')
+        bot = request.app.get('bot')
+        
+        if dp and bot:
+            try:
+                from aiogram.types import Update
+                
+                # Для aiogram 3.x используем model_validate
+                update = Update.model_validate(data)
+                
+                # Обрабатываем
+                await dp.feed_update(bot=bot, update=update)
+                logger.info(f"✅ Webhook update_id={update_id} обработан")
+                
+            except Exception as e:
+                logger.error(f"❌ Ошибка aiogram для update_id={update_id}: {e}")
+                # Пробуем альтернативный метод
+                try:
+                    # Создаем update через pydantic
+                    from pydantic import TypeAdapter
+                    from aiogram.types import Update
+                    
+                    adapter = TypeAdapter(Update)
+                    update = adapter.validate_python(data)
+                    await dp.feed_update(bot=bot, update=update)
+                    logger.info(f"✅ Webhook update_id={update_id} обработан (альтернативный метод)")
+                except Exception as e2:
+                    logger.error(f"❌ Альтернативный метод тоже не сработал: {e2}")
+                    # Сохраняем сырые данные для отладки
+                    import json
+                    with open(f'webhook_debug_{update_id}.json', 'w') as f:
+                        json.dump(data, f, indent=2)
         
         return web.Response(text="OK")
+        
+    except json.JSONDecodeError:
+        logger.error("❌ Неверный JSON в вебхуке")
+        return web.Response(text="Invalid JSON", status=400)
     except Exception as e:
-        logger.error(f"❌ Ошибка обработки вебхука: {e}")
-        return web.Response(status=500, text=str(e))
+        logger.error(f"❌ Критическая ошибка в вебхуке: {e}")
+        import traceback
+        traceback.print_exc()
+        return web.Response(text="Server Error", status=500)
 
 async def ping_handler(request):
     """Простой пинг-эндпоинт"""
@@ -292,149 +437,117 @@ async def health_handler(request):
 
 async def index_handler(request):
     """Главная страница"""
-    try:
-        # Создаем простую HTML страницу для дашборда
-        bot = request.app.get('bot')
-        
-        html = f"""
-        <!DOCTYPE html>
-        <html lang="ru">
-        <head>
-            <meta charset="UTF-8">
-            <meta name="viewport" content="width=device-width, initial-scale=1.0">
-            <title>ShadowTalk Bot Dashboard</title>
-            <style>
-                body {{
-                    font-family: 'Segoe UI', Tahoma, Geneva, Verdana, sans-serif;
-                    background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
-                    margin: 0;
-                    padding: 20px;
-                    min-height: 100vh;
-                    display: flex;
-                    justify-content: center;
-                    align-items: center;
-                }}
-                .container {{
-                    background: rgba(255, 255, 255, 0.9);
-                    backdrop-filter: blur(10px);
-                    border-radius: 20px;
-                    padding: 40px;
-                    box-shadow: 0 20px 60px rgba(0,0,0,0.3);
-                    max-width: 800px;
-                    width: 100%;
-                }}
-                h1 {{
-                    color: #333;
-                    text-align: center;
-                    margin-bottom: 30px;
-                }}
-                .status {{
-                    background: {'#4CAF50' if bot else '#f44336'};
-                    color: white;
-                    padding: 15px;
-                    border-radius: 10px;
-                    text-align: center;
-                    font-size: 18px;
-                    margin-bottom: 30px;
-                }}
-                .stats {{
-                    display: grid;
-                    grid-template-columns: repeat(auto-fit, minmax(200px, 1fr));
-                    gap: 20px;
-                    margin-bottom: 30px;
-                }}
-                .stat-card {{
-                    background: white;
-                    padding: 20px;
-                    border-radius: 10px;
-                    box-shadow: 0 5px 15px rgba(0,0,0,0.1);
-                    text-align: center;
-                }}
-                .stat-card h3 {{
-                    margin: 0;
-                    color: #666;
-                    font-size: 14px;
-                }}
-                .stat-card .value {{
-                    font-size: 24px;
-                    font-weight: bold;
-                    color: #333;
-                    margin: 10px 0;
-                }}
-                .links {{
-                    text-align: center;
-                    margin-top: 30px;
-                }}
-                .links a {{
-                    display: inline-block;
-                    margin: 0 10px;
-                    padding: 12px 30px;
-                    background: #667eea;
-                    color: white;
-                    text-decoration: none;
-                    border-radius: 25px;
-                    transition: transform 0.3s, box-shadow 0.3s;
-                }}
-                .links a:hover {{
-                    transform: translateY(-3px);
-                    box-shadow: 0 10px 20px rgba(0,0,0,0.2);
-                }}
-            </style>
-        </head>
-        <body>
-            <div class="container">
-                <h1>🤖 ShadowTalk Bot Dashboard</h1>
-                
-                <div class="status">
-                    {'✅ Бот запущен и работает через вебхуки' if bot else '❌ Бот не запущен'}
-                </div>
-                
-                <div class="stats">
-                    <div class="stat-card">
-                        <h3>Аптайм</h3>
-                        <div class="value" id="uptime">{str(datetime.now() - START_TIME).split('.')[0]}</div>
-                    </div>
-                    <div class="stat-card">
-                        <h3>Вебхук</h3>
-                        <div class="value">{'✅ Включен' if WEBHOOK_URL else '❌ Отключен'}</div>
-                    </div>
-                    <div class="stat-card">
-                        <h3>Статус</h3>
-                        <div class="value">{'🟢 Online' if bot else '🔴 Offline'}</div>
-                    </div>
-                </div>
-                
-                <div class="links">
-                    <a href="/ping" target="_blank">Ping Test</a>
-                    <a href="/health" target="_blank">Health Check</a>
-                    {'<a href="/webhook" target="_blank">Webhook</a>' if WEBHOOK_URL else ''}
-                </div>
+    bot = request.app.get('bot')
+    
+    html = f"""
+    <!DOCTYPE html>
+    <html lang="ru">
+    <head>
+        <meta charset="UTF-8">
+        <meta name="viewport" content="width=device-width, initial-scale=1.0">
+        <title>ShadowTalk Bot Dashboard</title>
+        <style>
+            body {{
+                font-family: 'Segoe UI', Tahoma, Geneva, Verdana, sans-serif;
+                background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
+                margin: 0;
+                padding: 20px;
+                min-height: 100vh;
+                display: flex;
+                justify-content: center;
+                align-items: center;
+            }}
+            .container {{
+                background: rgba(255, 255, 255, 0.9);
+                backdrop-filter: blur(10px);
+                border-radius: 20px;
+                padding: 40px;
+                box-shadow: 0 20px 60px rgba(0,0,0,0.3);
+                max-width: 800px;
+                width: 100%;
+                text-align: center;
+            }}
+            h1 {{
+                color: #333;
+                margin-bottom: 30px;
+            }}
+            .status {{
+                background: {'#4CAF50' if bot else '#f44336'};
+                color: white;
+                padding: 15px;
+                border-radius: 10px;
+                font-size: 18px;
+                margin-bottom: 30px;
+            }}
+            .info {{
+                background: white;
+                padding: 20px;
+                border-radius: 10px;
+                box-shadow: 0 5px 15px rgba(0,0,0,0.1);
+                margin: 20px 0;
+                text-align: left;
+            }}
+            .links a {{
+                display: inline-block;
+                margin: 10px;
+                padding: 12px 30px;
+                background: #667eea;
+                color: white;
+                text-decoration: none;
+                border-radius: 25px;
+                transition: transform 0.3s, box-shadow 0.3s;
+            }}
+            .links a:hover {{
+                transform: translateY(-3px);
+                box-shadow: 0 10px 20px rgba(0,0,0,0.2);
+            }}
+        </style>
+    </head>
+    <body>
+        <div class="container">
+            <h1>🤖 ShadowTalk Bot Dashboard</h1>
+            
+            <div class="status">
+                {'✅ Бот запущен и работает через вебхуки' if bot else '❌ Бот не запущен'}
             </div>
             
-            <script>
-                // Обновляем аптайм каждую секунду
-                function updateUptime() {{
-                    const startTime = new Date("{START_TIME.isoformat()}");
-                    const now = new Date();
-                    const diff = new Date(now - startTime);
-                    
-                    const hours = diff.getUTCHours().toString().padStart(2, '0');
-                    const minutes = diff.getUTCMinutes().toString().padStart(2, '0');
-                    const seconds = diff.getUTCSeconds().toString().padStart(2, '0');
-                    
-                    document.getElementById('uptime').textContent = `${hours}:${minutes}:${seconds}`;
-                }}
-                
-                updateUptime();
-                setInterval(updateUptime, 1000);
-            </script>
-        </body>
-        </html>
-        """
+            <div class="info">
+                <h3>📊 Статус системы:</h3>
+                <p>• Веб-панель: <strong>🟢 Online</strong></p>
+                <p>• Бот: <strong>{'🟢 Запущен' if bot else '🔴 Остановлен'}</strong></p>
+                <p>• Вебхук: <strong>{'✅ Установлен' if WEBHOOK_URL else '❌ Не установлен'}</strong></p>
+                <p>• Аптайм: <strong id="uptime">{str(datetime.now() - START_TIME).split('.')[0]}</strong></p>
+            </div>
+            
+            <div class="links">
+                <a href="/ping" target="_blank">Ping Test</a>
+                <a href="/health" target="_blank">Health Check</a>
+                <a href="/webhook_debug" target="_blank">Webhook Debug</a>
+            </div>
+        </div>
         
-        return web.Response(text=html, content_type='text/html')
-    except Exception as e:
-        return web.Response(text=f"Ошибка загрузки страницы: {str(e)}", status=500)
+        <script>
+            // Обновляем аптайм каждую секунду
+            function updateUptime() {{
+                const startTime = new Date("{START_TIME.isoformat()}");
+                const now = new Date();
+                const diff = new Date(now - startTime);
+                
+                const hours = diff.getUTCHours().toString().padStart(2, '0');
+                const minutes = diff.getUTCMinutes().toString().padStart(2, '0');
+                const seconds = diff.getUTCSeconds().toString().padStart(2, '0');
+                
+                document.getElementById('uptime').textContent = `${hours}:${minutes}:${seconds}`;
+            }}
+            
+            updateUptime();
+            setInterval(updateUptime, 1000);
+        </script>
+    </body>
+    </html>
+    """
+    
+    return web.Response(text=html, content_type='text/html')
 
 async def api_stats_handler(request):
     """API для получения статистики"""
@@ -453,7 +566,8 @@ def create_app():
     app = web.Application(client_max_size=10*1024*1024)  # 10MB max
     
     # Базовые маршруты
-    app.router.add_post(WEBHOOK_PATH, webhook_handler)  # ОБРАБОТЧИК ВЕБХУКОВ
+    app.router.add_post(WEBHOOK_PATH, simple_webhook_handler)  # ОСНОВНОЙ ОБРАБОТЧИК
+    app.router.add_post('/webhook_debug', debug_webhook_handler)  # ОТЛАДОЧНЫЙ
     app.router.add_get('/ping', ping_handler)
     app.router.add_get('/health', health_handler)
     app.router.add_get('/', index_handler)
