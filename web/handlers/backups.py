@@ -1,22 +1,14 @@
 """
-Обработчик страницы управления бекапами с возможностью загрузки, отправки и просмотра БД
+Обработчик страницы управления бекапами
 """
 from aiohttp import web
 from web.utils.templates import get_base_html
 import os
-import json
-from datetime import datetime
-import shutil
 import sqlite3
-from aiohttp import web
-import aiohttp
-import asyncio
+from datetime import datetime
 
-# Импортируем менеджер БД
-import sys
-sys.path.append(os.path.join(os.path.dirname(__file__), '..', '..'))
+# Используем глобальный экземпляр из database_manager
 from app.database_manager import db_manager
-from app.config import ADMIN_IDS, BOT_TOKEN
 
 async def backups_handler(request):
     """Страница управления бекапами"""
@@ -40,7 +32,7 @@ async def backups_handler(request):
                 <td>{'✅' if backup['is_valid'] else '❌'}</td>
                 <td>
                     <div style="display: flex; gap: 5px;">
-                        <a href="/download_backup?file={backup['name']}" class="btn" style="padding: 8px 15px;" title="Скачать">
+                        <a href="/api/download_backup?file={backup['name']}" class="btn" style="padding: 8px 15px;" title="Скачать">
                             <i class="fas fa-download"></i>
                         </a>
                         <button class="btn btn-secondary" style="padding: 8px 15px;" 
@@ -145,7 +137,7 @@ async def backups_handler(request):
                 </div>
                 <div style="background: rgba(245, 158, 11, 0.1); padding: 20px; border-radius: 15px; text-align: center;">
                     <div style="font-size: 2em; font-weight: 800; color: var(--warning);">
-                        {len(db_info.get('tables', []))}
+                        {db_info.get('table_count', 0)}
                     </div>
                     <div style="color: var(--gray);">Таблиц в БД</div>
                 </div>
@@ -414,35 +406,21 @@ async def backups_handler(request):
                     body: formData
                 }});
                 
-                const reader = response.body.getReader();
-                const decoder = new TextDecoder();
-                let result = '';
+                if (!response.ok) {{
+                    throw new Error('Ошибка загрузки: ' + response.status);
+                }}
                 
-                while (true) {{
-                    const {{value, done}} = await reader.read();
-                    if (done) break;
-                    
-                    result += decoder.decode(value);
-                    
-                    // Парсим прогресс из SSE
-                    const lines = result.split('\\n');
-                    for (const line of lines) {{
-                        if (line.startsWith('data: ')) {{
-                            const data = JSON.parse(line.slice(6));
-                            if (data.progress) {{
-                                progressBar.style.width = data.progress + '%';
-                                uploadStatus.textContent = data.message;
-                            }}
-                            if (data.success !== undefined) {{
-                                if (data.success) {{
-                                    alert('✅ БД успешно загружена!');
-                                    location.reload();
-                                }} else {{
-                                    alert('❌ Ошибка: ' + data.error);
-                                }}
-                            }}
-                        }}
-                    }}
+                const result = await response.json();
+                
+                if (result.success) {{
+                    progressBar.style.width = '100%';
+                    uploadStatus.textContent = '✅ БД успешно загружена!';
+                    setTimeout(() => {{
+                        location.reload();
+                    }}, 2000);
+                }} else {{
+                    uploadStatus.textContent = '❌ Ошибка: ' + result.error;
+                    progressBar.style.width = '100%';
                 }}
             }} catch (error) {{
                 uploadStatus.textContent = '❌ Ошибка загрузки: ' + error;
@@ -514,415 +492,3 @@ async def get_current_db_info():
         
     except Exception as e:
         return {"total_records": 0, "tables_html": f"<p>Ошибка: {e}</p>"}
-
-# Добавьте эти функции в ваш routes.py
-async def download_backup(request):
-    """Скачать бекап"""
-    try:
-        filename = request.query.get('file')
-        if not filename:
-            return web.Response(status=400, text="Не указано имя файла")
-        
-        filepath = os.path.join('backups', filename)
-        if not os.path.exists(filepath):
-            return web.Response(status=404, text="Файл не найден")
-        
-        return web.FileResponse(
-            filepath,
-            headers={
-                'Content-Disposition': f'attachment; filename="{filename}"',
-                'Content-Type': 'application/octet-stream'
-            }
-        )
-        
-    except Exception as e:
-        return web.Response(status=500, text=f"Ошибка: {e}")
-
-async def upload_db_handler(request):
-    """Обработчик загрузки БД"""
-    try:
-        reader = await request.multipart()
-        field = await reader.next()
-        
-        if field.name != 'database':
-            return web.Response(status=400, text="Неверное поле")
-        
-        filename = field.filename
-        if not filename.endswith('.db'):
-            return web.Response(status=400, text="Только файлы .db разрешены")
-        
-        # Создаем директорию uploads если нет
-        upload_dir = 'uploads'
-        os.makedirs(upload_dir, exist_ok=True)
-        
-        filepath = os.path.join(upload_dir, filename)
-        
-        # Записываем файл
-        size = 0
-        with open(filepath, 'wb') as f:
-            while True:
-                chunk = await field.read_chunk()
-                if not chunk:
-                    break
-                size += len(chunk)
-                f.write(chunk)
-        
-        # Проверяем валидность
-        if not db_manager.validate_backup(filepath):
-            os.remove(filepath)
-            return web.Response(status=400, text="Файл не является валидной SQLite БД")
-        
-        # Создаем бекап текущей БД если запрошено
-        data = await request.post()
-        if 'create_backup' in data and data['create_backup'] == 'on':
-            db_manager.create_backup("before_upload_backup.db", send_to_admins=False)
-        
-        # Восстанавливаем БД
-        success = db_manager.restore_from_backup(filepath)
-        
-        if success:
-            # Отправляем админам если запрошено
-            if 'send_to_admins' in data and data['send_to_admins'] == 'on':
-                await send_database_to_admins(db_manager.db_path, "Загруженная база данных")
-            
-            return web.json_response({
-                "success": True,
-                "message": "БД успешно загружена и восстановлена"
-            })
-        else:
-            return web.json_response({
-                "success": False,
-                "error": "Ошибка восстановления БД"
-            })
-            
-    except Exception as e:
-        return web.Response(status=500, text=f"Ошибка: {e}")
-
-async def send_database_to_admins(db_path, caption):
-    """Отправить базу данных всем админам через Telegram"""
-    try:
-        if not BOT_TOKEN or not ADMIN_IDS:
-            return {"sent": 0, "total": 0, "error": "Не настроен бот или админы"}
-        
-        from aiogram import Bot
-        from aiogram.types import FSInputFile
-        
-        bot = Bot(token=BOT_TOKEN)
-        sent_count = 0
-        
-        for admin_id in ADMIN_IDS:
-            try:
-                await bot.send_document(
-                    chat_id=admin_id,
-                    document=FSInputFile(db_path),
-                    caption=f"📁 {caption}\n⏰ {datetime.now().strftime('%H:%M:%S')}"
-                )
-                sent_count += 1
-            except Exception as e:
-                print(f"Ошибка отправки админу {admin_id}: {e}")
-        
-        await bot.session.close()
-        return {"sent": sent_count, "total": len(ADMIN_IDS)}
-        
-    except Exception as e:
-        return {"sent": 0, "total": len(ADMIN_IDS), "error": str(e)}
-
-async def get_backup_info_handler(request):
-    """Получить информацию о бэкапе"""
-    try:
-        filename = request.query.get('file')
-        if not filename:
-            return web.json_response({"success": False, "error": "Не указано имя файла"})
-        
-        filepath = os.path.join('backups', filename)
-        if not os.path.exists(filepath):
-            return web.json_response({"success": False, "error": "Файл не найден"})
-        
-        # Получаем информацию о файле
-        stat = os.stat(filepath)
-        size_mb = stat.st_size / (1024 * 1024)
-        created = datetime.fromtimestamp(stat.st_ctime)
-        
-        # Получаем информацию о содержимом БД
-        conn = sqlite3.connect(f"file:{filepath}?mode=ro", uri=True)
-        cursor = conn.cursor()
-        
-        cursor.execute("SELECT name FROM sqlite_master WHERE type='table'")
-        tables = [row[0] for row in cursor.fetchall()]
-        
-        table_info = []
-        total_records = 0
-        
-        for table in tables:
-            try:
-                cursor.execute(f"SELECT COUNT(*) FROM {table}")
-                count = cursor.fetchone()[0]
-                total_records += count
-                
-                cursor.execute(f"PRAGMA table_info({table})")
-                columns = cursor.fetchall()
-                
-                table_info.append({
-                    'name': table,
-                    'records': count,
-                    'columns': len(columns),
-                    'column_names': [col[1] for col in columns[:5]]
-                })
-            except:
-                continue
-        
-        conn.close()
-        
-        html = f'''
-        <div style="margin-bottom: 20px;">
-            <div style="font-weight: 600; color: var(--primary); margin-bottom: 5px;">Имя файла:</div>
-            <div>{filename}</div>
-        </div>
-        
-        <div style="margin-bottom: 20px;">
-            <div style="font-weight: 600; color: var(--primary); margin-bottom: 5px;">Размер:</div>
-            <div>{size_mb:.2f} MB ({stat.st_size:,} байт)</div>
-        </div>
-        
-        <div style="margin-bottom: 20px;">
-            <div style="font-weight: 600; color: var(--primary); margin-bottom: 5px;">Дата создания:</div>
-            <div>{created.strftime('%d.%m.%Y %H:%M:%S')}</div>
-        </div>
-        
-        <div style="margin-bottom: 20px;">
-            <div style="font-weight: 600; color: var(--primary); margin-bottom: 5px;">Таблиц:</div>
-            <div>{len(tables)}</div>
-        </div>
-        
-        <div style="margin-bottom: 20px;">
-            <div style="font-weight: 600; color: var(--primary); margin-bottom: 5px;">Всего записей:</div>
-            <div>{total_records:,}</div>
-        </div>
-        
-        <div style="margin-bottom: 20px;">
-            <div style="font-weight: 600; color: var(--primary); margin-bottom: 10px;">Таблицы:</div>
-            <div style="max-height: 300px; overflow-y: auto;">
-        '''
-        
-        for table in table_info:
-            html += f'''
-            <div style="background: #f7fafc; padding: 10px; margin-bottom: 10px; border-radius: 8px; border-left: 4px solid var(--primary);">
-                <div style="font-weight: 600; color: var(--primary);">{table['name']}</div>
-                <div style="font-size: 0.9em; color: var(--gray);">
-                    Записей: {table['records']:,} | Колонок: {table['columns']}<br>
-                    Колонки: {', '.join(table['column_names'])}{'...' if len(table['column_names']) < table['columns'] else ''}
-                </div>
-            </div>
-            '''
-        
-        html += '''
-            </div>
-        </div>
-        
-        <div style="background: rgba(16, 185, 129, 0.1); padding: 15px; border-radius: 10px;">
-            <div style="font-weight: 600; color: var(--success); margin-bottom: 5px;">Действия:</div>
-            <div style="display: flex; gap: 10px;">
-                <button onclick="restoreBackup('''' + filename + '''')" class="btn btn-secondary" style="flex: 1;">
-                    <i class="fas fa-undo"></i> Восстановить
-                </button>
-                <button onclick="sendToAdmins('''' + filename + '''')" class="btn btn-warning" style="flex: 1;">
-                    <i class="fas fa-paper-plane"></i> Отправить админам
-                </button>
-            </div>
-        </div>
-        '''
-        
-        return web.json_response({
-            "success": True,
-            "html": html
-        })
-        
-    except Exception as e:
-        return web.json_response({"success": False, "error": str(e)})
-
-async def get_db_detailed_info_handler(request):
-    """Получить детальную информацию о текущей БД"""
-    try:
-        db_info = await get_current_db_info()
-        db_path = db_manager.db_path
-        
-        if not os.path.exists(db_path):
-            return web.json_response({
-                "success": False, 
-                "error": "БД не найдена"
-            })
-        
-        stat = os.stat(db_path)
-        size_mb = stat.st_size / (1024 * 1024)
-        modified = datetime.fromtimestamp(stat.st_mtime)
-        
-        conn = sqlite3.connect(db_path)
-        cursor = conn.cursor()
-        
-        # Получаем статистику по пользователям
-        try:
-            cursor.execute("SELECT COUNT(*) FROM users")
-            users_count = cursor.fetchone()[0]
-            
-            cursor.execute("SELECT COUNT(*) FROM users WHERE anon_link_uid IS NOT NULL")
-            active_users = cursor.fetchone()[0]
-            
-            cursor.execute("SELECT COUNT(*) FROM users WHERE available_reveals > 0")
-            premium_users = cursor.fetchone()[0]
-        except:
-            users_count = active_users = premium_users = 0
-        
-        # Получаем статистику по сообщениям
-        try:
-            cursor.execute("SELECT COUNT(*) FROM anon_messages")
-            messages_count = cursor.fetchone()[0]
-            
-            cursor.execute("SELECT COUNT(*) FROM anon_messages WHERE timestamp >= datetime('now', '-1 day')")
-            messages_today = cursor.fetchone()[0]
-        except:
-            messages_count = messages_today = 0
-        
-        # Получаем статистику по платежам
-        try:
-            cursor.execute("SELECT COUNT(*) FROM payments WHERE status = 'completed'")
-            payments_count = cursor.fetchone()[0]
-            
-            cursor.execute("SELECT SUM(amount) FROM payments WHERE status = 'completed'")
-            total_revenue = cursor.fetchone()[0] or 0
-        except:
-            payments_count = total_revenue = 0
-        
-        conn.close()
-        
-        html = f'''
-        <div style="display: grid; grid-template-columns: repeat(2, 1fr); gap: 20px; margin-bottom: 30px;">
-            <div style="background: rgba(99, 102, 241, 0.1); padding: 20px; border-radius: 15px;">
-                <div style="font-weight: 600; color: var(--primary); margin-bottom: 5px;">Размер БД:</div>
-                <div style="font-size: 1.5em; font-weight: 800;">{size_mb:.2f} MB</div>
-            </div>
-            
-            <div style="background: rgba(16, 185, 129, 0.1); padding: 20px; border-radius: 15px;">
-                <div style="font-weight: 600; color: var(--success); margin-bottom: 5px;">Последнее изменение:</div>
-                <div>{modified.strftime('%d.%m.%Y %H:%M:%S')}</div>
-            </div>
-            
-            <div style="background: rgba(139, 92, 246, 0.1); padding: 20px; border-radius: 15px;">
-                <div style="font-weight: 600; color: var(--secondary); margin-bottom: 5px;">Всего таблиц:</div>
-                <div style="font-size: 1.5em; font-weight: 800;">{len(db_info.get('tables', []))}</div>
-            </div>
-            
-            <div style="background: rgba(245, 158, 11, 0.1); padding: 20px; border-radius: 15px;">
-                <div style="font-weight: 600; color: var(--warning); margin-bottom: 5px;">Всего записей:</div>
-                <div style="font-size: 1.5em; font-weight: 800;">{db_info.get('total_records', 0):,}</div>
-            </div>
-        </div>
-        
-        <div style="background: white; padding: 20px; border-radius: 15px; margin-bottom: 20px; box-shadow: 0 2px 10px rgba(0,0,0,0.1);">
-            <h4 style="color: var(--primary); margin-bottom: 15px;">📊 Статистика пользователей</h4>
-            <div style="display: grid; grid-template-columns: repeat(2, 1fr); gap: 15px;">
-                <div>
-                    <div style="font-weight: 600; color: var(--gray);">Всего пользователей:</div>
-                    <div style="font-size: 1.2em; font-weight: 600;">{users_count}</div>
-                </div>
-                <div>
-                    <div style="font-weight: 600; color: var(--gray);">Активных пользователей:</div>
-                    <div style="font-size: 1.2em; font-weight: 600;">{active_users}</div>
-                </div>
-                <div>
-                    <div style="font-weight: 600; color: var(--gray);">Премиум пользователей:</div>
-                    <div style="font-size: 1.2em; font-weight: 600;">{premium_users}</div>
-                </div>
-            </div>
-        </div>
-        
-        <div style="background: white; padding: 20px; border-radius: 15px; margin-bottom: 20px; box-shadow: 0 2px 10px rgba(0,0,0,0.1);">
-            <h4 style="color: var(--primary); margin-bottom: 15px;">📨 Статистика сообщений</h4>
-            <div style="display: grid; grid-template-columns: repeat(2, 1fr); gap: 15px;">
-                <div>
-                    <div style="font-weight: 600; color: var(--gray);">Всего сообщений:</div>
-                    <div style="font-size: 1.2em; font-weight: 600;">{messages_count}</div>
-                </div>
-                <div>
-                    <div style="font-weight: 600; color: var(--gray);">Сообщений за 24ч:</div>
-                    <div style="font-size: 1.2em; font-weight: 600;">{messages_today}</div>
-                </div>
-            </div>
-        </div>
-        
-        <div style="background: white; padding: 20px; border-radius: 15px; margin-bottom: 20px; box-shadow: 0 2px 10px rgba(0,0,0,0.1);">
-            <h4 style="color: var(--primary); margin-bottom: 15px;">💰 Финансовая статистика</h4>
-            <div style="display: grid; grid-template-columns: repeat(2, 1fr); gap: 15px;">
-                <div>
-                    <div style="font-weight: 600; color: var(--gray);">Всего платежей:</div>
-                    <div style="font-size: 1.2em; font-weight: 600;">{payments_count}</div>
-                </div>
-                <div>
-                    <div style="font-weight: 600; color: var(--gray);">Общая выручка:</div>
-                    <div style="font-size: 1.2em; font-weight: 600;">{total_revenue / 100:.2f} ₽</div>
-                </div>
-            </div>
-        </div>
-        
-        <div style="background: rgba(16, 185, 129, 0.1); padding: 20px; border-radius: 15px; margin-top: 20px;">
-            <h4 style="color: var(--success); margin-bottom: 15px;">⚡ Быстрые действия</h4>
-            <div style="display: flex; gap: 10px;">
-                <button onclick="sendCurrentDbToAdmins()" class="btn btn-warning" style="flex: 1;">
-                    <i class="fas fa-paper-plane"></i> Отправить эту БД админам
-                </button>
-                <a href="/api/create_backup" class="btn btn-success" style="flex: 1;">
-                    <i class="fas fa-plus"></i> Создать бекап
-                </a>
-            </div>
-        </div>
-        '''
-        
-        return web.json_response({
-            "success": True,
-            "html": html
-        })
-        
-    except Exception as e:
-        return web.json_response({"success": False, "error": str(e)})
-
-
-# В backups.py или отдельном файле добавьте:
-async def send_to_admins_handler(request):
-    """Отправить бекап админам"""
-    try:
-        filename = request.query.get('file')
-        if not filename:
-            return web.json_response({"success": False, "error": "Не указано имя файла"})
-        
-        filepath = os.path.join('backups', filename)
-        if not os.path.exists(filepath):
-            return web.json_response({"success": False, "error": "Файл не найден"})
-        
-        result = await send_database_to_admins(filepath, f"Бекап БД: {filename}")
-        
-        return web.json_response({
-            "success": "error" not in result or not result["error"],
-            "sent": result["sent"],
-            "total": result["total"],
-            "error": result.get("error")
-        })
-        
-    except Exception as e:
-        return web.json_response({"success": False, "error": str(e)})
-
-async def send_current_db_to_admins_handler(request):
-    """Отправить текущую БД админам"""
-    try:
-        result = await send_database_to_admins(
-            db_manager.db_path, 
-            "Текущая база данных"
-        )
-        
-        return web.json_response({
-            "success": "error" not in result or not result["error"],
-            "sent": result["sent"],
-            "total": result["total"],
-            "error": result.get("error")
-        })
-        
-    except Exception as e:
-        return web.json_response({"success": False, "error": str(e)})
