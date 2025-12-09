@@ -1,5 +1,5 @@
 """
-Главный файл запуска бота с поддержкой Render
+Главный файл запуска бота с поддержкой вебхуков и поллинга
 """
 import asyncio
 import sys
@@ -28,6 +28,8 @@ logger = logging.getLogger(__name__)
 
 # Флаг для отслеживания запуска
 _bot_initialized = False
+_bot_instance = None
+_dp_instance = None
 
 def setup_directories():
     """Создание необходимых директорий"""
@@ -38,11 +40,11 @@ def setup_directories():
 
 async def initialize_bot():
     """Инициализация бота - вызывается только один раз"""
-    global _bot_initialized
+    global _bot_initialized, _bot_instance, _dp_instance
     
     if _bot_initialized:
-        logger.warning("⚠️ Бот уже инициализирован, пропускаем повторную инициализацию")
-        return
+        logger.warning("⚠️ Бот уже инициализирован, возвращаем существующие экземпляры")
+        return _bot_instance, _dp_instance
     
     _bot_initialized = True
     
@@ -62,7 +64,23 @@ async def initialize_bot():
         logger.info(f"✅ Админы: {ADMIN_IDS}")
         logger.info(f"✅ Render: {IS_RENDER}")
         
-        # 3. Инициализируем менеджер БД
+        # 3. Создаем таблицы БД
+        from app.database import Base, engine
+        logger.info("🔄 Создание таблиц БД...")
+        try:
+            Base.metadata.create_all(bind=engine)
+            
+            # Проверяем таблицы
+            from sqlalchemy import inspect
+            inspector = inspect(engine)
+            tables = inspector.get_table_names()
+            logger.info(f"📊 Таблицы в БД: {tables}")
+        except Exception as e:
+            logger.error(f"❌ Ошибка создания таблиц БД: {e}")
+            import traceback
+            traceback.print_exc()
+        
+        # 4. Инициализируем менеджер БД ПОСЛЕ создания таблиц
         logger.info("💾 Инициализация менеджера БД...")
         try:
             # Импортируем здесь, чтобы избежать циклических импортов
@@ -76,27 +94,16 @@ async def initialize_bot():
             logger.error(f"❌ Ошибка инициализации менеджера БД: {e}")
             # Продолжаем работу
         
-        # 4. Создаем таблицы БД
-        from app.database import create_tables
-        logger.info("🔄 Создание таблиц БД...")
-        try:
-            create_tables()
-            
-            # Проверяем таблицы
-            from sqlalchemy import inspect
-            from app.database import engine
-            inspector = inspect(engine)
-            tables = inspector.get_table_names()
-            logger.info(f"📊 Таблицы в БД: {tables}")
-        except Exception as e:
-            logger.error(f"❌ Ошибка создания таблиц БД: {e}")
-        
         # 5. Инициализируем самого бота
         from aiogram import Bot, Dispatcher
         from aiogram.fsm.storage.memory import MemoryStorage
         
         bot = Bot(token=BOT_TOKEN)
         dp = Dispatcher(storage=MemoryStorage())
+        
+        # Сохраняем экземпляры
+        _bot_instance = bot
+        _dp_instance = dp
         
         # 6. Регистрируем роутеры
         logger.info("📋 Регистрация роутеров...")
@@ -124,7 +131,7 @@ async def initialize_bot():
         bot_info = await bot.get_me()
         logger.info(f"✅ Bot: @{bot_info.username} ({bot_info.first_name})")
         
-        # 8. Отправляем уведомление админам
+        # 8. Отправляем уведомление админам (только при поллинге или первом запуске)
         try:
             from app.database_manager import db_manager
             db_info = db_manager.get_db_info()
@@ -133,23 +140,12 @@ async def initialize_bot():
             db_info = {"size_mb": 0}
             backup_count = 0
         
-        try:
-            message = (
-                f"🚀 <b>Бот {'перезапущен' if IS_RENDER else 'запущен'}!</b>\n\n"
-                f"🤖 @{bot_info.username}\n"
-                f"⏰ {datetime.now().strftime('%d.%m.%Y %H:%M')}\n"
-                f"🌐 Render: {'✅ Да' if IS_RENDER else '❌ Нет'}\n"
-                f"👥 Админов: {len(ADMIN_IDS)}\n"
-                f"💾 БД: {db_info.get('size_mb', 0):.2f} MB\n"
-                f"📂 Бэкапов: {backup_count}\n"
-                f"📝 /backup - создать бэкап\n"
-                f"📋 /backups - список бэкапов"
-            )
-            
-            for admin_id in ADMIN_IDS:
-                await bot.send_message(admin_id, message, parse_mode="HTML")
-        except Exception as e:
-            logger.error(f"❌ Ошибка отправки уведомления: {e}")
+        # Сохраняем информацию о боте для использования
+        bot_info_dict = {
+            "username": bot_info.username,
+            "first_name": bot_info.first_name,
+            "id": bot_info.id
+        }
         
         return bot, dp
         
@@ -159,11 +155,40 @@ async def initialize_bot():
         traceback.print_exc()
         raise
 
-async def run_bot():
-    """Основная функция запуска бота"""
+async def notify_admins_on_startup(bot, is_webhook=False):
+    """Отправляет уведомление администраторам о запуске"""
     try:
-        # Инициализируем бота (один раз)
+        from app.config import ADMIN_IDS
+        from app.database_manager import db_manager
+        
+        db_info = db_manager.get_db_info()
+        backup_count = len(db_manager.list_backups())
+        
+        mode = "вебхуки" if is_webhook else "поллинг"
+        message = (
+            f"🚀 <b>Бот запущен ({mode})!</b>\n\n"
+            f"🤖 @{bot.username}\n"
+            f"⏰ {datetime.now().strftime('%d.%m.%Y %H:%M')}\n"
+            f"🌐 Режим: {mode}\n"
+            f"👥 Админов: {len(ADMIN_IDS)}\n"
+            f"💾 БД: {db_info.get('size_mb', 0):.2f} MB\n"
+            f"📂 Бэкапов: {backup_count}\n"
+            f"📝 /backup - создать бэкап\n"
+            f"📋 /backups - список бэкапов"
+        )
+        
+        for admin_id in ADMIN_IDS:
+            await bot.send_message(admin_id, message, parse_mode="HTML")
+    except Exception as e:
+        logger.error(f"❌ Ошибка отправки уведомления: {e}")
+
+async def run_polling():
+    """Запуск бота в режиме поллинга (для локальной разработки)"""
+    try:
         bot, dp = await initialize_bot()
+        
+        # Отправляем уведомление о запуске
+        await notify_admins_on_startup(await bot.get_me(), is_webhook=False)
         
         # Удаляем вебхук если был
         await bot.delete_webhook(drop_pending_updates=True)
@@ -173,7 +198,7 @@ async def run_bot():
         await dp.start_polling(bot)
         
     except Exception as e:
-        logger.error(f"❌ Критическая ошибка в run_bot: {e}")
+        logger.error(f"❌ Критическая ошибка в режиме поллинга: {e}")
         import traceback
         traceback.print_exc()
         
@@ -186,7 +211,7 @@ async def run_bot():
             for admin_id in ADMIN_IDS:
                 await bot.send_message(
                     admin_id,
-                    f"🚨 <b>Бот упал!</b>\n\n"
+                    f"🚨 <b>Бот упал (поллинг)!</b>\n\n"
                     f"Ошибка: {str(e)[:200]}...\n"
                     f"Время: {datetime.now().strftime('%H:%M:%S')}",
                     parse_mode="HTML"
@@ -196,10 +221,46 @@ async def run_bot():
         
         sys.exit(1)
 
+async def run_webhook_mode():
+    """Запуск бота в режиме ожидания вебхуков (для Render)"""
+    try:
+        logger.info("🌐 Запуск в режиме ожидания вебхуков...")
+        
+        bot, dp = await initialize_bot()
+        
+        # Отправляем уведомление о запуске
+        await notify_admins_on_startup(await bot.get_me(), is_webhook=True)
+        
+        logger.info("✅ Бот инициализирован для вебхуков")
+        logger.info("📡 Ожидаю обновления через вебхуки...")
+        
+        # Бесконечное ожидание (вебхуки будут обрабатываться render_server.py)
+        while True:
+            await asyncio.sleep(3600)  # Спим по часу
+        
+    except Exception as e:
+        logger.error(f"❌ Критическая ошибка в режиме вебхуков: {e}")
+        import traceback
+        traceback.print_exc()
+        sys.exit(1)
+
+async def run_bot():
+    """Основная функция запуска бота - определяет режим работы"""
+    from app.config import IS_RENDER
+    
+    if IS_RENDER:
+        # На Render используем режим ожидания вебхуков
+        logger.info("🌐 Обнаружен Render, использую режим вебхуков")
+        await run_webhook_mode()
+    else:
+        # Локально используем поллинг
+        logger.info("💻 Локальный запуск, использую поллинг")
+        await run_polling()
+
 async def run_bot_async():
     """
-    Асинхронная версия для запуска из render_server.py
-    ВАЖНО: Эта функция должна вызываться только из одного места
+    Асинхронная версия для запуска из других модулей
+    Используется render_server.py
     """
     logger.info("🤖 Запуск бота в асинхронном режиме...")
     await run_bot()
@@ -216,6 +277,10 @@ def handle_shutdown(signum, frame):
         logger.error(f"❌ Ошибка создания бэкапа при выходе: {e}")
     
     sys.exit(0)
+
+def get_bot_instances():
+    """Возвращает экземпляры бота и диспетчера (для render_server.py)"""
+    return _bot_instance, _dp_instance
 
 def main():
     """Точка входа - для запуска бота отдельно (не из Render)"""
