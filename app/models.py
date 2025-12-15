@@ -1,10 +1,9 @@
 from sqlalchemy import Boolean, Column, Integer, String, DateTime, ForeignKey, Text, Index
 from sqlalchemy.orm import relationship
-from sqlalchemy.ext.declarative import declarative_base
 from datetime import datetime, timedelta
 
-# Создаем Base здесь, чтобы избежать циклического импорта
-Base = declarative_base()
+# Импортируем Base из database.py чтобы был один источник
+from app.database import Base
 
 class User(Base):
     __tablename__ = "users"
