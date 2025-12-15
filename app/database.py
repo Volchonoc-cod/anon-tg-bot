@@ -5,9 +5,13 @@ import os
 import time
 from sqlalchemy import create_engine
 from sqlalchemy.orm import sessionmaker
+from sqlalchemy.ext.declarative import declarative_base
 import logging
 
 logger = logging.getLogger(__name__)
+
+# Создаем Base здесь для импорта в другие модули
+Base = declarative_base()
 
 # Путь к базе данных в папке data
 BASE_DIR = os.path.dirname(os.path.abspath(__file__))
@@ -22,12 +26,13 @@ if DATABASE_URL.startswith('postgres://'):
 
 # Глобальные переменные для управления соединением
 _engine = None
+engine = None  # Для обратной совместимости
 _SessionLocal = None
 _last_reconnect = None
 
 def get_engine():
     """Получить или создать engine"""
-    global _engine
+    global _engine, engine
     if _engine is None:
         _engine = create_engine(
             DATABASE_URL,
@@ -38,8 +43,13 @@ def get_engine():
                 "timeout": 30
             } if "sqlite" in DATABASE_URL else {}
         )
+        engine = _engine  # Устанавливаем для обратной совместимости
         logger.info(f"✅ Engine БД создан: {DATABASE_URL}")
     return _engine
+
+def get_engine_instance():
+    """Получить engine (для обратной совместимости)"""
+    return get_engine()
 
 def get_session_local():
     """Получить sessionmaker"""
@@ -59,8 +69,8 @@ def get_db():
 def create_tables():
     """Создает все таблицы в базе данных"""
     try:
-        # Импортируем здесь, чтобы избежать циклического импорта
-        from .models import Base
+        # Импортируем модели, чтобы они зарегистрировались у Base
+        from .models import User, AnonMessage, Payment
         Base.metadata.create_all(bind=get_engine())
         logger.info("✅ Таблицы БД созданы/проверены")
         return True
@@ -73,7 +83,7 @@ def force_reconnect():
     Принудительно переподключиться к базе данных
     Полезно после восстановления БД из бэкапа
     """
-    global _engine, _SessionLocal, _last_reconnect
+    global _engine, engine, _SessionLocal, _last_reconnect
     
     logger.info("🔄 Принудительное переподключение к БД...")
     
@@ -85,6 +95,7 @@ def force_reconnect():
         
         # 2. Сбрасываем кэш
         _engine = None
+        engine = None
         _SessionLocal = None
         
         # 3. Даем время на закрытие (особенно для SQLite)
@@ -107,6 +118,7 @@ def force_reconnect():
         
         # 6. Обновляем глобальные переменные
         _engine = new_engine
+        engine = new_engine
         _SessionLocal = sessionmaker(autocommit=False, autoflush=False, bind=_engine)
         
         _last_reconnect = time.time()
@@ -147,3 +159,6 @@ def get_database_info():
         "is_postgres": "postgresql" in DATABASE_URL,
         "data_dir": DATA_DIR
     }
+
+# Экспортируемые объекты для обратной совместимости
+__all__ = ['get_engine', 'get_engine_instance', 'engine', 'Base', 'get_db', 'get_session_local', 'create_tables']
