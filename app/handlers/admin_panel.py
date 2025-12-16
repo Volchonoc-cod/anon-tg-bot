@@ -6,7 +6,7 @@ from aiogram.filters import Command
 from aiogram.fsm.context import FSMContext
 from aiogram.fsm.state import State, StatesGroup
 from sqlalchemy.orm import Session
-from sqlalchemy import func, desc
+from sqlalchemy import func, desc, text
 from datetime import datetime, timedelta
 import asyncio
 from aiogram.types import Message, CallbackQuery, FSInputFile
@@ -61,7 +61,7 @@ async def admin_panel(message: types.Message):
     try:
         engine = get_engine()
         with engine.connect() as conn:
-            # Проверяем наличие таблиц - ПРАВИЛЬНЫЙ СИНТАКСИС
+            # Проверяем наличие таблиц - С ИСПОЛЬЗОВАНИЕМ text()
             result = conn.execute(text("SELECT name FROM sqlite_master WHERE type='table'"))
             tables = [row[0] for row in result.fetchall()]
             
@@ -69,7 +69,7 @@ async def admin_panel(message: types.Message):
                 await message.answer("⚠️ <b>Таблица users не найдена</b>", parse_mode="HTML")
                 return
             
-            # Получаем статистику напрямую через SQL - ПРАВИЛЬНЫЙ СИНТАКСИС
+            # Получаем статистику через SQL с использованием text()
             result = conn.execute(text("SELECT COUNT(*) FROM users"))
             total_users = result.scalar() or 0
             
@@ -123,9 +123,6 @@ async def admin_panel(message: types.Message):
         logger.error(f"Ошибка в admin_panel: {e}")
         await message.answer(f"❌ Ошибка получения статистики: {str(e)[:200]}")
 
-# Импортируйте text из sqlalchemy
-from sqlalchemy import text
-
 # ==================== УПРАВЛЕНИЕ БАЗОЙ ДАННЫХ ====================
 
 @router.message(Command("reload_db"), admin_filter)
@@ -144,7 +141,7 @@ async def cmd_reload_db(message: Message):
         engine = get_engine()
         with engine.connect() as conn:
             # Проверяем наличие таблиц
-            result = conn.execute("SELECT name FROM sqlite_master WHERE type='table'")
+            result = conn.execute(text("SELECT name FROM sqlite_master WHERE type='table'"))
             tables = [row[0] for row in result.fetchall()]
             
             # Получаем статистику
@@ -152,11 +149,11 @@ async def cmd_reload_db(message: Message):
             message_count = 0
             
             if 'users' in tables:
-                result = conn.execute("SELECT COUNT(*) FROM users")
+                result = conn.execute(text("SELECT COUNT(*) FROM users"))
                 user_count = result.scalar() or 0
             
             if 'anon_messages' in tables:
-                result = conn.execute("SELECT COUNT(*) FROM anon_messages")
+                result = conn.execute(text("SELECT COUNT(*) FROM anon_messages"))
                 message_count = result.scalar() or 0
         
         # Получаем информацию о файле БД
@@ -309,10 +306,10 @@ async def cmd_restore_selected(message: Message):
             
             engine = get_engine()
             with engine.connect() as conn:
-                result = conn.execute("SELECT COUNT(*) FROM users")
+                result = conn.execute(text("SELECT COUNT(*) FROM users"))
                 user_count = result.scalar() or 0
                 
-                result = conn.execute("SELECT COUNT(*) FROM anon_messages")
+                result = conn.execute(text("SELECT COUNT(*) FROM anon_messages"))
                 message_count = result.scalar() or 0
             
             response = (
@@ -432,10 +429,10 @@ async def confirm_restore_database(callback: types.CallbackQuery, bot: Bot):
             
             engine = get_engine()
             with engine.connect() as conn:
-                result = conn.execute("SELECT COUNT(*) FROM users")
+                result = conn.execute(text("SELECT COUNT(*) FROM users"))
                 user_count = result.scalar() or 0
                 
-                result = conn.execute("SELECT COUNT(*) FROM anon_messages")
+                result = conn.execute(text("SELECT COUNT(*) FROM anon_messages"))
                 message_count = result.scalar() or 0
             
             new_backup = db_manager.create_backup("after_restore_backup.db")
@@ -522,11 +519,14 @@ async def admin_users(message: types.Message):
     try:
         engine = get_engine()
         with engine.connect() as conn:
-            result = conn.execute("SELECT COUNT(*) FROM users")
+            result = conn.execute(text("SELECT COUNT(*) FROM users"))
             total_users = result.scalar() or 0
             
             today = datetime.now().date().strftime('%Y-%m-%d')
-            result = conn.execute(f"SELECT COUNT(*) FROM users WHERE DATE(created_at) = '{today}'")
+            result = conn.execute(
+                text("SELECT COUNT(*) FROM users WHERE DATE(created_at) = :today"),
+                {"today": today}
+            )
             today_users = result.scalar() or 0
         
         text = (
@@ -554,11 +554,14 @@ async def admin_users_callback(callback: types.CallbackQuery):
     try:
         engine = get_engine()
         with engine.connect() as conn:
-            result = conn.execute("SELECT COUNT(*) FROM users")
+            result = conn.execute(text("SELECT COUNT(*) FROM users"))
             total_users = result.scalar() or 0
             
             today = datetime.now().date().strftime('%Y-%m-%d')
-            result = conn.execute(f"SELECT COUNT(*) FROM users WHERE DATE(created_at) = '{today}'")
+            result = conn.execute(
+                text("SELECT COUNT(*) FROM users WHERE DATE(created_at) = :today"),
+                {"today": today}
+            )
             today_users = result.scalar() or 0
         
         text = (
@@ -591,10 +594,13 @@ async def admin_users_list(callback: types.CallbackQuery):
             users_per_page = 5
             offset = (page - 1) * users_per_page
             
-            result = conn.execute(f"SELECT * FROM users ORDER BY created_at DESC LIMIT {users_per_page} OFFSET {offset}")
+            result = conn.execute(
+                text("SELECT * FROM users ORDER BY created_at DESC LIMIT :limit OFFSET :offset"),
+                {"limit": users_per_page, "offset": offset}
+            )
             users = result.fetchall()
             
-            result = conn.execute("SELECT COUNT(*) FROM users")
+            result = conn.execute(text("SELECT COUNT(*) FROM users"))
             total_users = result.scalar() or 0
             
         total_pages = (total_users + users_per_page - 1) // users_per_page
@@ -602,6 +608,7 @@ async def admin_users_list(callback: types.CallbackQuery):
         text = f"📋 <b>Список пользователей</b> (страница {page}/{total_pages})\n\n"
         
         for user in users:
+            user_id = user[0]
             telegram_id = user[1]
             first_name = user[3]
             username = user[2] or "не указан"
@@ -614,7 +621,10 @@ async def admin_users_list(callback: types.CallbackQuery):
                 created_date = created_at.strftime('%d.%m.%Y')
             
             with engine.connect() as conn:
-                result = conn.execute(f"SELECT COUNT(*) FROM anon_messages WHERE sender_id = {user[0]} OR receiver_id = {user[0]}")
+                result = conn.execute(
+                    text("SELECT COUNT(*) FROM anon_messages WHERE sender_id = :user_id OR receiver_id = :user_id"),
+                    {"user_id": user_id}
+                )
                 messages_count = result.scalar() or 0
             
             text += (
@@ -651,10 +661,13 @@ async def admin_users_page(callback: types.CallbackQuery):
         
         engine = get_engine()
         with engine.connect() as conn:
-            result = conn.execute(f"SELECT * FROM users ORDER BY created_at DESC LIMIT {users_per_page} OFFSET {offset}")
+            result = conn.execute(
+                text("SELECT * FROM users ORDER BY created_at DESC LIMIT :limit OFFSET :offset"),
+                {"limit": users_per_page, "offset": offset}
+            )
             users = result.fetchall()
             
-            result = conn.execute("SELECT COUNT(*) FROM users")
+            result = conn.execute(text("SELECT COUNT(*) FROM users"))
             total_users = result.scalar() or 0
             
         total_pages = (total_users + users_per_page - 1) // users_per_page
@@ -662,6 +675,7 @@ async def admin_users_page(callback: types.CallbackQuery):
         text = f"📋 <b>Список пользователей</b> (страница {page}/{total_pages})\n\n"
         
         for user in users:
+            user_id = user[0]
             telegram_id = user[1]
             first_name = user[3]
             username = user[2] or "не указан"
@@ -674,7 +688,10 @@ async def admin_users_page(callback: types.CallbackQuery):
                 created_date = created_at.strftime('%d.%m.%Y')
             
             with engine.connect() as conn:
-                result = conn.execute(f"SELECT COUNT(*) FROM anon_messages WHERE sender_id = {user[0]} OR receiver_id = {user[0]}")
+                result = conn.execute(
+                    text("SELECT COUNT(*) FROM anon_messages WHERE sender_id = :user_id OR receiver_id = :user_id"),
+                    {"user_id": user_id}
+                )
                 messages_count = result.scalar() or 0
             
             text += (
@@ -728,18 +745,27 @@ async def admin_users_search_result(message: types.Message, state: FSMContext):
         
         with engine.connect() as conn:
             if search_query.isdigit():
-                result = conn.execute(f"SELECT * FROM users WHERE telegram_id = {int(search_query)}")
+                result = conn.execute(
+                    text("SELECT * FROM users WHERE telegram_id = :telegram_id"),
+                    {"telegram_id": int(search_query)}
+                )
                 user = result.fetchone()
                 if user:
                     users.append(user)
             
             elif search_query.startswith('@'):
                 username = search_query[1:]
-                result = conn.execute(f"SELECT * FROM users WHERE username LIKE '%{username}%'")
+                result = conn.execute(
+                    text("SELECT * FROM users WHERE username LIKE :username"),
+                    {"username": f"%{username}%"}
+                )
                 users = result.fetchall()
             
             else:
-                result = conn.execute(f"SELECT * FROM users WHERE first_name LIKE '%{search_query}%'")
+                result = conn.execute(
+                    text("SELECT * FROM users WHERE first_name LIKE :first_name"),
+                    {"first_name": f"%{search_query}%"}
+                )
                 users = result.fetchall()
         
         if not users:
@@ -749,7 +775,7 @@ async def admin_users_search_result(message: types.Message, state: FSMContext):
         
         if len(users) == 1:
             user = users[0]
-            
+            user_id = user[0]
             telegram_id = user[1]
             first_name = user[3]
             username = user[2] or "не указан"
@@ -758,16 +784,28 @@ async def admin_users_search_result(message: types.Message, state: FSMContext):
             created_at = user[6]
             
             with engine.connect() as conn:
-                result = conn.execute(f"SELECT COUNT(*) FROM anon_messages WHERE sender_id = {user[0]}")
+                result = conn.execute(
+                    text("SELECT COUNT(*) FROM anon_messages WHERE sender_id = :user_id"),
+                    {"user_id": user_id}
+                )
                 sent_messages = result.scalar() or 0
                 
-                result = conn.execute(f"SELECT COUNT(*) FROM anon_messages WHERE receiver_id = {user[0]}")
+                result = conn.execute(
+                    text("SELECT COUNT(*) FROM anon_messages WHERE receiver_id = :user_id"),
+                    {"user_id": user_id}
+                )
                 received_messages = result.scalar() or 0
                 
-                result = conn.execute(f"SELECT COUNT(*) FROM payments WHERE user_id = {user[0]} AND status = 'completed'")
+                result = conn.execute(
+                    text("SELECT COUNT(*) FROM payments WHERE user_id = :user_id AND status = 'completed'"),
+                    {"user_id": user_id}
+                )
                 total_payments = result.scalar() or 0
                 
-                result = conn.execute(f"SELECT COALESCE(SUM(amount), 0) FROM payments WHERE user_id = {user[0]} AND status = 'completed'")
+                result = conn.execute(
+                    text("SELECT COALESCE(SUM(amount), 0) FROM payments WHERE user_id = :user_id AND status = 'completed'"),
+                    {"user_id": user_id}
+                )
                 total_spent = result.scalar() or 0
             
             if isinstance(created_at, str):
@@ -792,7 +830,7 @@ async def admin_users_search_result(message: types.Message, state: FSMContext):
             )
             
             await message.answer(text, parse_mode="HTML", 
-                               reply_markup=admin_user_actions_menu(user[0]))
+                               reply_markup=admin_user_actions_menu(user_id))
         else:
             text = f"🔍 <b>Найдено пользователей:</b> {len(users)}\n\n"
             for i, user in enumerate(users[:10], 1):
@@ -1029,28 +1067,37 @@ async def admin_stats(message: types.Message):
     try:
         engine = get_engine()
         with engine.connect() as conn:
-            result = conn.execute("SELECT COUNT(*) FROM users")
+            result = conn.execute(text("SELECT COUNT(*) FROM users"))
             total_users = result.scalar() or 0
             
             week_ago = (datetime.now() - timedelta(days=7)).strftime('%Y-%m-%d')
-            result = conn.execute(f"SELECT COUNT(*) FROM users WHERE DATE(created_at) >= '{week_ago}'")
+            result = conn.execute(
+                text("SELECT COUNT(*) FROM users WHERE DATE(created_at) >= :week_ago"),
+                {"week_ago": week_ago}
+            )
             week_users = result.scalar() or 0
             
-            result = conn.execute("SELECT COUNT(*) FROM anon_messages")
+            result = conn.execute(text("SELECT COUNT(*) FROM anon_messages"))
             total_messages = result.scalar() or 0
             
-            result = conn.execute(f"SELECT COUNT(*) FROM anon_messages WHERE DATE(timestamp) >= '{week_ago}'")
+            result = conn.execute(
+                text("SELECT COUNT(*) FROM anon_messages WHERE DATE(timestamp) >= :week_ago"),
+                {"week_ago": week_ago}
+            )
             week_messages = result.scalar() or 0
             
-            result = conn.execute("SELECT COUNT(*) FROM payments WHERE status = 'completed'")
+            result = conn.execute(text("SELECT COUNT(*) FROM payments WHERE status = 'completed'"))
             total_payments = result.scalar() or 0
             
-            result = conn.execute("SELECT COALESCE(SUM(amount), 0) FROM payments WHERE status = 'completed'")
+            result = conn.execute(text("SELECT COALESCE(SUM(amount), 0) FROM payments WHERE status = 'completed'"))
             total_revenue = result.scalar() or 0
             
             package_stats = {}
             for package_id in price_service.get_all_packages():
-                result = conn.execute(f"SELECT COUNT(*) FROM payments WHERE payment_type = '{package_id}' AND status = 'completed'")
+                result = conn.execute(
+                    text("SELECT COUNT(*) FROM payments WHERE payment_type = :package_id AND status = 'completed'"),
+                    {"package_id": package_id}
+                )
                 count = result.scalar() or 0
                 package_stats[package_id] = count
 
@@ -1088,28 +1135,37 @@ async def admin_stats_callback(callback: types.CallbackQuery):
     try:
         engine = get_engine()
         with engine.connect() as conn:
-            result = conn.execute("SELECT COUNT(*) FROM users")
+            result = conn.execute(text("SELECT COUNT(*) FROM users"))
             total_users = result.scalar() or 0
             
             week_ago = (datetime.now() - timedelta(days=7)).strftime('%Y-%m-%d')
-            result = conn.execute(f"SELECT COUNT(*) FROM users WHERE DATE(created_at) >= '{week_ago}'")
+            result = conn.execute(
+                text("SELECT COUNT(*) FROM users WHERE DATE(created_at) >= :week_ago"),
+                {"week_ago": week_ago}
+            )
             week_users = result.scalar() or 0
             
-            result = conn.execute("SELECT COUNT(*) FROM anon_messages")
+            result = conn.execute(text("SELECT COUNT(*) FROM anon_messages"))
             total_messages = result.scalar() or 0
             
-            result = conn.execute(f"SELECT COUNT(*) FROM anon_messages WHERE DATE(timestamp) >= '{week_ago}'")
+            result = conn.execute(
+                text("SELECT COUNT(*) FROM anon_messages WHERE DATE(timestamp) >= :week_ago"),
+                {"week_ago": week_ago}
+            )
             week_messages = result.scalar() or 0
             
-            result = conn.execute("SELECT COUNT(*) FROM payments WHERE status = 'completed'")
+            result = conn.execute(text("SELECT COUNT(*) FROM payments WHERE status = 'completed'"))
             total_payments = result.scalar() or 0
             
-            result = conn.execute("SELECT COALESCE(SUM(amount), 0) FROM payments WHERE status = 'completed'")
+            result = conn.execute(text("SELECT COALESCE(SUM(amount), 0) FROM payments WHERE status = 'completed'"))
             total_revenue = result.scalar() or 0
             
             package_stats = {}
             for package_id in price_service.get_all_packages():
-                result = conn.execute(f"SELECT COUNT(*) FROM payments WHERE payment_type = '{package_id}' AND status = 'completed'")
+                result = conn.execute(
+                    text("SELECT COUNT(*) FROM payments WHERE payment_type = :package_id AND status = 'completed'"),
+                    {"package_id": package_id}
+                )
                 count = result.scalar() or 0
                 package_stats[package_id] = count
 
@@ -1149,10 +1205,10 @@ async def admin_broadcast(message: types.Message):
     try:
         engine = get_engine()
         with engine.connect() as conn:
-            result = conn.execute("SELECT COUNT(*) FROM users")
+            result = conn.execute(text("SELECT COUNT(*) FROM users"))
             total_users = result.scalar() or 0
             
-            result = conn.execute("SELECT COUNT(*) FROM users WHERE anon_link_uid IS NOT NULL")
+            result = conn.execute(text("SELECT COUNT(*) FROM users WHERE anon_link_uid IS NOT NULL"))
             active_users = result.scalar() or 0
         
         text = (
@@ -1181,10 +1237,10 @@ async def admin_broadcast_callback(callback: types.CallbackQuery):
     try:
         engine = get_engine()
         with engine.connect() as conn:
-            result = conn.execute("SELECT COUNT(*) FROM users")
+            result = conn.execute(text("SELECT COUNT(*) FROM users"))
             total_users = result.scalar() or 0
             
-            result = conn.execute("SELECT COUNT(*) FROM users WHERE anon_link_uid IS NOT NULL")
+            result = conn.execute(text("SELECT COUNT(*) FROM users WHERE anon_link_uid IS NOT NULL"))
             active_users = result.scalar() or 0
         
         text = (
@@ -1332,7 +1388,7 @@ async def exit_admin_panel(message: types.Message):
 
     await message.answer(
         "🚪 <b>Выход из админ-панели</b>\n\n"
-        "Вы уверены, что хотите выйти из админ  панели?",
+        "Вы уверены, что хотите выйти из админ-панели?",
         parse_mode="HTML",
         reply_markup=exit_admin_keyboard()
     )
@@ -1420,13 +1476,13 @@ async def payment_status_command(message: types.Message):
     try:
         engine = get_engine()
         with engine.connect() as conn:
-            result = conn.execute("SELECT COUNT(*) FROM payments WHERE status = 'completed'")
+            result = conn.execute(text("SELECT COUNT(*) FROM payments WHERE status = 'completed'"))
             total_payments = result.scalar() or 0
             
-            result = conn.execute("SELECT COUNT(*) FROM payments WHERE status = 'pending'")
+            result = conn.execute(text("SELECT COUNT(*) FROM payments WHERE status = 'pending'"))
             pending_payments = result.scalar() or 0
             
-            result = conn.execute("SELECT COALESCE(SUM(amount), 0) FROM payments WHERE status = 'completed'")
+            result = conn.execute(text("SELECT COALESCE(SUM(amount), 0) FROM payments WHERE status = 'completed'"))
             total_revenue = result.scalar() or 0
         
         text = (
@@ -1463,13 +1519,17 @@ async def user_info_command(message: types.Message):
         
         engine = get_engine()
         with engine.connect() as conn:
-            result = conn.execute(f"SELECT * FROM users WHERE telegram_id = {telegram_id}")
+            result = conn.execute(
+                text("SELECT * FROM users WHERE telegram_id = :telegram_id"),
+                {"telegram_id": telegram_id}
+            )
             user = result.fetchone()
             
             if not user:
                 await message.answer("❌ Пользователь не найден")
                 return
 
+            user_id = user[0]
             telegram_id = user[1]
             first_name = user[3]
             username = user[2] or "не указан"
@@ -1477,16 +1537,28 @@ async def user_info_command(message: types.Message):
             anon_link_uid = user[5] or "нет"
             created_at = user[6]
             
-            result = conn.execute(f"SELECT COUNT(*) FROM anon_messages WHERE sender_id = {user[0]}")
+            result = conn.execute(
+                text("SELECT COUNT(*) FROM anon_messages WHERE sender_id = :user_id"),
+                {"user_id": user_id}
+            )
             sent_messages = result.scalar() or 0
             
-            result = conn.execute(f"SELECT COUNT(*) FROM anon_messages WHERE receiver_id = {user[0]}")
+            result = conn.execute(
+                text("SELECT COUNT(*) FROM anon_messages WHERE receiver_id = :user_id"),
+                {"user_id": user_id}
+            )
             received_messages = result.scalar() or 0
             
-            result = conn.execute(f"SELECT COUNT(*) FROM payments WHERE user_id = {user[0]} AND status = 'completed'")
+            result = conn.execute(
+                text("SELECT COUNT(*) FROM payments WHERE user_id = :user_id AND status = 'completed'"),
+                {"user_id": user_id}
+            )
             total_payments = result.scalar() or 0
             
-            result = conn.execute(f"SELECT COALESCE(SUM(amount), 0) FROM payments WHERE user_id = {user[0]} AND status = 'completed'")
+            result = conn.execute(
+                text("SELECT COALESCE(SUM(amount), 0) FROM payments WHERE user_id = :user_id AND status = 'completed'"),
+                {"user_id": user_id}
+            )
             total_spent = result.scalar() or 0
         
         if isinstance(created_at, str):
@@ -1642,16 +1714,16 @@ async def stats_command(message: types.Message):
     try:
         engine = get_engine()
         with engine.connect() as conn:
-            result = conn.execute("SELECT COUNT(*) FROM users")
+            result = conn.execute(text("SELECT COUNT(*) FROM users"))
             total_users = result.scalar() or 0
             
-            result = conn.execute("SELECT COUNT(*) FROM anon_messages")
+            result = conn.execute(text("SELECT COUNT(*) FROM anon_messages"))
             total_messages = result.scalar() or 0
             
-            result = conn.execute("SELECT COUNT(*) FROM payments WHERE status = 'completed'")
+            result = conn.execute(text("SELECT COUNT(*) FROM payments WHERE status = 'completed'"))
             total_payments = result.scalar() or 0
             
-            result = conn.execute("SELECT COALESCE(SUM(amount), 0) FROM payments WHERE status = 'completed'")
+            result = conn.execute(text("SELECT COALESCE(SUM(amount), 0) FROM payments WHERE status = 'completed'"))
             total_revenue = result.scalar() or 0
         
         text = (
