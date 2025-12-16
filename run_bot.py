@@ -98,34 +98,10 @@ def remove_lock_file():
 
 def setup_directories():
     """Создание необходимых директорий"""
-    directories = ['data', 'backups', 'logs']
+    directories = ['data', 'backups', 'logs', 'uploads']
     for directory in directories:
         os.makedirs(directory, exist_ok=True)
         logger.info(f"📁 Создана директория: {directory}")
-
-def create_database_tables():
-    """Создает таблицы в базе данных"""
-    try:
-        from app.database import get_engine, Base
-        from app.models import User, AnonMessage, Payment
-        
-        # Получаем engine
-        engine = get_engine()
-        
-        # Создаем таблицы
-        Base.metadata.create_all(bind=engine)
-        
-        from sqlalchemy import inspect
-        inspector = inspect(engine)
-        tables = inspector.get_table_names()
-        
-        logger.info(f"📊 Таблицы в БД созданы: {tables}")
-        return True
-    except Exception as e:
-        logger.error(f"❌ Ошибка создания таблиц БД: {e}")
-        import traceback
-        traceback.print_exc()
-        return False
 
 async def initialize_bot():
     """Инициализация бота"""
@@ -149,6 +125,19 @@ async def initialize_bot():
             return None, None
         # ============ КОНЕЦ НОВОГО КОДА ============
         
+        # ============ КРИТИЧЕСКОЕ ИЗМЕНЕНИЕ: ИНИЦИАЛИЗАЦИЯ БД ПЕРВОЙ ============
+        logger.info("🚀 ИНИЦИАЛИЗАЦИЯ БАЗЫ ДАННЫХ...")
+        try:
+            from app.database import init_db
+            if not init_db():
+                logger.error("❌ Не удалось инициализировать базу данных!")
+                # НЕ ЗАВЕРШАЕМ, пробуем продолжить, возможно таблицы уже есть
+        except Exception as e:
+            logger.error(f"❌ Ошибка инициализации БД: {e}")
+            import traceback
+            traceback.print_exc()
+        # ============ КОНЕЦ КРИТИЧЕСКОГО ИЗМЕНЕНИЯ ============
+        
         # Загружаем конфигурацию
         from app.config import BOT_TOKEN, ADMIN_IDS
         
@@ -157,14 +146,6 @@ async def initialize_bot():
         
         logger.info(f"✅ Конфигурация загружена: Bot Token = {BOT_TOKEN[:10]}...")
         logger.info(f"✅ Админы: {ADMIN_IDS}")
-        
-        # Создаем таблицы БД (ПЕРВЫМ ДЕЛОМ!)
-        logger.info("🔄 Создание таблиц БД...")
-        if create_database_tables():
-            logger.info("✅ Таблицы БД созданы успешно")
-        else:
-            logger.error("❌ Не удалось создать таблицы БД")
-            # Все равно продолжаем, возможно таблицы уже существуют
         
         # Создаем бота
         from aiogram import Bot
