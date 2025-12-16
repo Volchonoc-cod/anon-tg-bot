@@ -61,39 +61,49 @@ async def admin_panel(message: types.Message):
     try:
         engine = get_engine()
         with engine.connect() as conn:
-            # Проверяем наличие таблиц
-            result = conn.execute("SELECT name FROM sqlite_master WHERE type='table'")
+            # Проверяем наличие таблиц - ПРАВИЛЬНЫЙ СИНТАКСИС
+            result = conn.execute(text("SELECT name FROM sqlite_master WHERE type='table'"))
             tables = [row[0] for row in result.fetchall()]
             
             if 'users' not in tables:
                 await message.answer("⚠️ <b>Таблица users не найдена</b>", parse_mode="HTML")
                 return
             
-            # Получаем статистику напрямую через SQL
-            result = conn.execute("SELECT COUNT(*) FROM users")
+            # Получаем статистику напрямую через SQL - ПРАВИЛЬНЫЙ СИНТАКСИС
+            result = conn.execute(text("SELECT COUNT(*) FROM users"))
             total_users = result.scalar() or 0
             
-            today = datetime.now().date().strftime('%Y-%m-%d')
-            result = conn.execute(f"SELECT COUNT(*) FROM users WHERE DATE(created_at) = '{today}'")
+            # Для даты используем параметризованные запросы
+            today = datetime.now().date()
+            result = conn.execute(
+                text("SELECT COUNT(*) FROM users WHERE DATE(created_at) = :today"),
+                {"today": today}
+            )
             today_users = result.scalar() or 0
             
-            result = conn.execute("SELECT COUNT(*) FROM anon_messages")
+            result = conn.execute(text("SELECT COUNT(*) FROM anon_messages"))
             total_messages = result.scalar() or 0
             
-            result = conn.execute(f"SELECT COUNT(*) FROM anon_messages WHERE DATE(timestamp) = '{today}'")
+            result = conn.execute(
+                text("SELECT COUNT(*) FROM anon_messages WHERE DATE(timestamp) = :today"),
+                {"today": today}
+            )
             today_messages = result.scalar() or 0
             
-            result = conn.execute("SELECT COUNT(*) FROM payments WHERE status = 'completed'")
+            result = conn.execute(text("SELECT COUNT(*) FROM payments WHERE status = 'completed'"))
             total_payments = result.scalar() or 0
             
-            result = conn.execute("SELECT COALESCE(SUM(amount), 0) FROM payments WHERE status = 'completed'")
+            result = conn.execute(text("SELECT COALESCE(SUM(amount), 0) FROM payments WHERE status = 'completed'"))
             total_revenue = result.scalar() or 0
 
-            week_ago = (datetime.now() - timedelta(days=7)).strftime('%Y-%m-%d')
-            result = conn.execute(f"SELECT COUNT(DISTINCT sender_id) FROM anon_messages WHERE DATE(timestamp) >= '{week_ago}'")
+            week_ago = datetime.now() - timedelta(days=7)
+            result = conn.execute(
+                text("SELECT COUNT(DISTINCT sender_id) FROM anon_messages WHERE timestamp >= :week_ago"),
+                {"week_ago": week_ago}
+            )
             active_users = result.scalar() or 0
 
-        text = (
+        text_response = (
             "👑 <b>Админ-панель ShadowTalk</b>\n\n"
             "📊 <b>Ключевая статистика:</b>\n"
             f"• 👥 Всего пользователей: <b>{total_users}</b>\n"
@@ -107,11 +117,14 @@ async def admin_panel(message: types.Message):
             "Используйте кнопки ниже для управления ботом"
         )
 
-        await message.answer(text, parse_mode="HTML", reply_markup=admin_main_menu())
+        await message.answer(text_response, parse_mode="HTML", reply_markup=admin_main_menu())
         
     except Exception as e:
         logger.error(f"Ошибка в admin_panel: {e}")
         await message.answer(f"❌ Ошибка получения статистики: {str(e)[:200]}")
+
+# Импортируйте text из sqlalchemy
+from sqlalchemy import text
 
 # ==================== УПРАВЛЕНИЕ БАЗОЙ ДАННЫХ ====================
 
