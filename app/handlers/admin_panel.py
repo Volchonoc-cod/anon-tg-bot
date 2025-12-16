@@ -178,8 +178,7 @@ async def cmd_reload_db(message: Message):
             f"📂 Таблиц: {len(tables)}\n"
             f"👥 Пользователей: {user_count}\n"
             f"💬 Сообщений: {message_count}\n\n"
-            f"✅ <b>Теперь все модули видят актуальные данные</b>",
-            parse_mode="HTML"
+            f"✅ <b>Теперь все модули видят актуальные данные</b>"
         )
         
         await message.answer(response_message, parse_mode="HTML")
