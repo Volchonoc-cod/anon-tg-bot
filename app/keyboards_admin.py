@@ -149,3 +149,26 @@ def exit_admin_keyboard():
             ]
         ]
     )
+# Добавьте в конец файла app/keyboards_admin.py:
+
+def admin_settings_menu():
+    """Клавиатура настроек"""
+    return InlineKeyboardMarkup(
+        inline_keyboard=[
+            [
+                InlineKeyboardButton(text="💾 Бэкап БД", callback_data="admin_backup"),
+                InlineKeyboardButton(text="🔄 Восстановить", callback_data="admin_restore")
+            ],
+            [
+                InlineKeyboardButton(text="📊 Статус БД", callback_data="admin_db_status"),
+                InlineKeyboardButton(text="🧹 Очистка", callback_data="admin_cleanup")
+            ],
+            [
+                InlineKeyboardButton(text="📁 Бэкапы", callback_data="admin_backups_list"),
+                InlineKeyboardButton(text="📤 Экспорт", callback_data="admin_export")
+            ],
+            [
+                InlineKeyboardButton(text="◀️ Назад", callback_data="admin_main")
+            ]
+        ]
+    )
