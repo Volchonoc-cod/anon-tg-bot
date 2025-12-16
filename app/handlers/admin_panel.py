@@ -2223,3 +2223,366 @@ async def fix_backups_command(message: Message):
     except Exception as e:
         logger.error(f"❌ Ошибка исправления бэкапов: {e}")
         await message.answer(f"❌ Ошибка: {str(e)[:200]}")
+
+
+@router.message(Command("emergency_fix_db"), admin_filter)
+async def emergency_fix_db_command(message: Message):
+    """ЭКСТРЕННОЕ исправление базы данных - создает таблицы если их нет"""
+    try:
+        await message.answer("🚨 <b>ЭКСТРЕННОЕ ИСПРАВЛЕНИЕ БАЗЫ ДАННЫХ!</b>\n"
+                           "Создаю таблицы напрямую через SQLite...", 
+                           parse_mode="HTML")
+        
+        import sqlite3
+        import os
+        
+        # Удаляем старую БД если она повреждена
+        db_path = 'data/bot.db'
+        if os.path.exists(db_path):
+            # Проверяем текущее состояние
+            conn = sqlite3.connect(db_path)
+            cursor = conn.cursor()
+            cursor.execute("SELECT name FROM sqlite_master WHERE type='table'")
+            current_tables = [row[0] for row in cursor.fetchall()]
+            conn.close()
+            
+            await message.answer(f"📊 <b>Текущее состояние БД:</b>\n"
+                               f"Таблиц: {len(current_tables)}\n"
+                               f"Список: {', '.join(current_tables) if current_tables else 'нет таблиц'}",
+                               parse_mode="HTML")
+        
+        # Создаем таблицы
+        await message.answer("🔄 <b>Создаю таблицы...</b>", parse_mode="HTML")
+        
+        conn = sqlite3.connect(db_path)
+        cursor = conn.cursor()
+        
+        # Таблица users
+        cursor.execute('''
+        CREATE TABLE IF NOT EXISTS users (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            telegram_id INTEGER UNIQUE NOT NULL,
+            username TEXT,
+            first_name TEXT NOT NULL,
+            last_name TEXT,
+            anon_link_uid TEXT UNIQUE,
+            created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+            updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+            is_banned BOOLEAN DEFAULT FALSE,
+            ban_reason TEXT,
+            available_reveals INTEGER DEFAULT 0,
+            total_reveals_used INTEGER DEFAULT 0
+        )
+        ''')
+        await message.answer("✅ Таблица 'users' создана")
+        
+        # Таблица anon_messages
+        cursor.execute('''
+        CREATE TABLE IF NOT EXISTS anon_messages (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            sender_id INTEGER,
+            receiver_id INTEGER NOT NULL,
+            message_text TEXT NOT NULL,
+            message_type TEXT DEFAULT 'text',
+            timestamp TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+            is_read BOOLEAN DEFAULT FALSE,
+            read_at TIMESTAMP,
+            is_revealed BOOLEAN DEFAULT FALSE,
+            revealed_at TIMESTAMP,
+            parent_message_id INTEGER,
+            FOREIGN KEY (sender_id) REFERENCES users (id),
+            FOREIGN KEY (receiver_id) REFERENCES users (id),
+            FOREIGN KEY (parent_message_id) REFERENCES anon_messages (id)
+        )
+        ''')
+        await message.answer("✅ Таблица 'anon_messages' создана")
+        
+        # Таблица payments
+        cursor.execute('''
+        CREATE TABLE IF NOT EXISTS payments (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            user_id INTEGER NOT NULL,
+            payment_id TEXT UNIQUE,
+            payment_type TEXT NOT NULL,
+            amount INTEGER NOT NULL,
+            currency TEXT DEFAULT 'RUB',
+            status TEXT DEFAULT 'pending',
+            created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+            completed_at TIMESTAMP,
+            metadata TEXT,
+            FOREIGN KEY (user_id) REFERENCES users (id)
+        )
+        ''')
+        await message.answer("✅ Таблица 'payments' создана")
+        
+        # Создаем индексы
+        cursor.execute('CREATE INDEX IF NOT EXISTS idx_users_telegram_id ON users(telegram_id)')
+        cursor.execute('CREATE INDEX IF NOT EXISTS idx_users_anon_link ON users(anon_link_uid)')
+        cursor.execute('CREATE INDEX IF NOT EXISTS idx_messages_receiver ON anon_messages(receiver_id)')
+        cursor.execute('CREATE INDEX IF NOT EXISTS idx_messages_sender ON anon_messages(sender_id)')
+        cursor.execute('CREATE INDEX IF NOT EXISTS idx_messages_timestamp ON anon_messages(timestamp)')
+        cursor.execute('CREATE INDEX IF NOT EXISTS idx_payments_user ON payments(user_id)')
+        cursor.execute('CREATE INDEX IF NOT EXISTS idx_payments_status ON payments(status)')
+        await message.answer("✅ Индексы созданы")
+        
+        conn.commit()
+        
+        # Проверяем результат
+        cursor.execute("SELECT name FROM sqlite_master WHERE type='table'")
+        new_tables = [row[0] for row in cursor.fetchall()]
+        
+        # Получаем статистику
+        stats = []
+        for table in new_tables:
+            cursor.execute(f"SELECT COUNT(*) FROM {table}")
+            count = cursor.fetchone()[0]
+            stats.append(f"• {table}: {count} записей")
+        
+        conn.close()
+        
+        # Добавляем администратора
+        from app.config import ADMIN_IDS
+        if ADMIN_IDS:
+            admin_id = ADMIN_IDS[0]
+            try:
+                conn = sqlite3.connect(db_path)
+                cursor = conn.cursor()
+                cursor.execute('''
+                INSERT OR IGNORE INTO users (telegram_id, first_name, username, anon_link_uid)
+                VALUES (?, ?, ?, ?)
+                ''', (admin_id, 'Администратор', 'admin', f'admin_{admin_id}'))
+                conn.commit()
+                conn.close()
+                await message.answer(f"✅ Администратор добавлен (ID: {admin_id})")
+            except Exception as e:
+                await message.answer(f"⚠️ Не удалось добавить администратора: {e}")
+        
+        # Перезагружаем подключение к БД
+        force_reconnect()
+        await asyncio.sleep(2)
+        
+        # Получаем финальную статистику
+        from app.database import get_engine
+        from sqlalchemy import text
+        engine = get_engine()
+        with engine.connect() as conn:
+            result = conn.execute(text("SELECT COUNT(*) FROM users"))
+            user_count = result.scalar() or 0
+        
+        await message.answer(
+            f"🎉 <b>БАЗА ДАННЫХ УСПЕШНО ИСПРАВЛЕНА!</b>\n\n"
+            f"📊 <b>Структура:</b>\n"
+            f"Таблиц: {len(new_tables)}\n"
+            f"Список: {', '.join(new_tables)}\n\n"
+            f"📈 <b>Статистика:</b>\n" + "\n".join(stats) + "\n\n"
+            f"👥 <b>Пользователей в БД:</b> {user_count}\n\n"
+            f"🔄 <b>Подключение к БД перезагружено!</b>",
+            parse_mode="HTML"
+        )
+        
+        # Создаем бэкап новой БД
+        await message.answer("💾 Создаю бэкап исправленной БД...")
+        await full_backup_command(message)
+        
+    except Exception as e:
+        logger.error(f"❌ Ошибка экстренного исправления БД: {e}")
+        await message.answer(f"❌ Ошибка: {str(e)[:200]}")
+
+@router.message(Command("db_structure"), admin_filter)
+async def db_structure_command(message: Message):
+    """Показать структуру базы данных"""
+    try:
+        import sqlite3
+        
+        db_path = 'data/bot.db'
+        
+        if not os.path.exists(db_path):
+            await message.answer("❌ Файл БД не найден")
+            return
+        
+        conn = sqlite3.connect(db_path)
+        cursor = conn.cursor()
+        
+        # Получаем все таблицы
+        cursor.execute("SELECT name FROM sqlite_master WHERE type='table' ORDER BY name")
+        tables = cursor.fetchall()
+        
+        response = "📊 <b>Структура базы данных:</b>\n\n"
+        
+        for table_info in tables:
+            table_name = table_info[0]
+            
+            # Получаем структуру таблицы
+            cursor.execute(f"PRAGMA table_info('{table_name}')")
+            columns = cursor.fetchall()
+            
+            response += f"📋 <b>Таблица: {table_name}</b>\n"
+            
+            for col in columns:
+                col_id, col_name, col_type, not_null, default_val, pk = col
+                pk_mark = "🔑" if pk else ""
+                response += f"  • {pk_mark} <code>{col_name}</code> ({col_type})"
+                if default_val:
+                    response += f" DEFAULT {default_val}"
+                if not_null:
+                    response += " NOT NULL"
+                response += "\n"
+            
+            # Получаем количество записей
+            try:
+                cursor.execute(f"SELECT COUNT(*) FROM {table_name}")
+                row_count = cursor.fetchone()[0]
+                response += f"  📝 Записей: <b>{row_count}</b>\n\n"
+            except:
+                response += f"  📝 Записей: <b>0</b> (ошибка чтения)\n\n"
+        
+        conn.close()
+        
+        # Добавляем информацию о файле
+        file_size = os.path.getsize(db_path) if os.path.exists(db_path) else 0
+        file_size_mb = file_size / (1024 * 1024)
+        
+        response += f"📁 <b>Информация о файле:</b>\n"
+        response += f"Путь: <code>{db_path}</code>\n"
+        response += f"Размер: {file_size_mb:.2f} MB\n"
+        response += f"Таблиц: {len(tables)}\n"
+        
+        # Проверяем обязательные таблицы
+        required_tables = ['users', 'anon_messages', 'payments']
+        found_tables = [t[0] for t in tables if t[0] in required_tables]
+        
+        if len(found_tables) < 3:
+            response += f"\n🚨 <b>ПРОБЛЕМА:</b> Отсутствуют таблицы!\n"
+            response += f"Найдено: {len(found_tables)} из 3\n"
+            missing = [t for t in required_tables if t not in found_tables]
+            response += f"Отсутствуют: {', '.join(missing)}\n"
+            response += f"\n🔧 <b>Исправьте командой:</b>\n"
+            response += f"<code>/emergency_fix_db</code>"
+        
+        if len(response) > 4096:
+            await message.answer(response[:4000] + "\n... (сообщение обрезано)", parse_mode="HTML")
+        else:
+            await message.answer(response, parse_mode="HTML")
+        
+    except Exception as e:
+        await message.answer(f"❌ Ошибка: {str(e)[:200]}")
+
+@router.message(Command("force_backup"), admin_filter)
+async def force_backup_command(message: Message):
+    """Создать бэкап БД с принудительным закрытием всех соединений"""
+    try:
+        await message.answer("🔄 <b>ПРИНУДИТЕЛЬНОЕ СОЗДАНИЕ БЭКАПА</b>\n"
+                           "Закрываю все соединения с БД...", 
+                           parse_mode="HTML")
+        
+        # Закрываем все соединения
+        force_reconnect()
+        await asyncio.sleep(3)  # Даем время на закрытие
+        
+        import sqlite3
+        import datetime
+        import shutil
+        
+        db_path = 'data/bot.db'
+        
+        if not os.path.exists(db_path):
+            await message.answer("❌ Файл БД не найден")
+            return
+        
+        # Создаем уникальное имя для бэкапа
+        timestamp = datetime.datetime.now().strftime("%Y%m%d_%H%M%S")
+        backup_name = f"FORCED_backup_{timestamp}.db"
+        backup_path = os.path.join('backups', backup_name)
+        
+        await message.answer("💾 <b>Копирую файл БД...</b>", parse_mode="HTML")
+        
+        # Простое копирование файла (самый надежный метод)
+        shutil.copy2(db_path, backup_path)
+        
+        # Проверяем бэкап
+        if os.path.exists(backup_path):
+            backup_size = os.path.getsize(backup_path)
+            
+            # Подключаемся к бэкапу для проверки
+            conn = sqlite3.connect(backup_path)
+            cursor = conn.cursor()
+            
+            # Проверяем таблицы
+            cursor.execute("SELECT name FROM sqlite_master WHERE type='table'")
+            tables = [row[0] for row in cursor.fetchall()]
+            
+            # Проверяем пользователей
+            user_count = 0
+            if 'users' in tables:
+                cursor.execute("SELECT COUNT(*) FROM users")
+                user_count = cursor.fetchone()[0]
+            
+            # Проверяем сообщения
+            msg_count = 0
+            if 'anon_messages' in tables:
+                cursor.execute("SELECT COUNT(*) FROM anon_messages")
+                msg_count = cursor.fetchone()[0]
+            
+            conn.close()
+            
+            backup_size_mb = backup_size / (1024 * 1024)
+            
+            await message.answer(
+                f"✅ <b>БЭКАП УСПЕШНО СОЗДАН!</b>\n\n"
+                f"📁 Файл: <code>{backup_name}</code>\n"
+                f"👥 Пользователей: <b>{user_count}</b>\n"
+                f"✉️ Сообщений: <b>{msg_count}</b>\n"
+                f"📊 Таблиц: <b>{len(tables)}</b>\n"
+                f"📦 Размер: <b>{backup_size_mb:.2f} MB</b>\n"
+                f"⏰ Время: {datetime.datetime.now().strftime('%H:%M:%S')}",
+                parse_mode="HTML"
+            )
+            
+            # Отправляем файл если он не слишком большой
+            if backup_size_mb < 20:
+                try:
+                    from aiogram.types import FSInputFile
+                    await message.answer_document(
+                        FSInputFile(backup_path),
+                        caption=f"📁 ПРИНУДИТЕЛЬНЫЙ бэкап\n👥 {user_count} пользователей"
+                    )
+                except Exception as e:
+                    await message.answer(f"⚠️ Не удалось отправить файл: {e}")
+            else:
+                await message.answer("⚠️ Файл слишком большой для отправки в Telegram")
+            
+            if user_count == 0:
+                await message.answer("🚨 <b>ВНИМАНИЕ:</b> В бэкапе 0 пользователей!\n"
+                                   "Возможно проблема с БД. Используйте команду:\n"
+                                   "<code>/emergency_fix_db</code>", 
+                                   parse_mode="HTML")
+                
+        else:
+            await message.answer("❌ Не удалось создать бэкап")
+        
+    except Exception as e:
+        await message.answer(f"❌ Ошибка: {str(e)[:200]}")
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
