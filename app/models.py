@@ -25,6 +25,9 @@ class User(Base):
     sent_messages = relationship("AnonMessage", foreign_keys="AnonMessage.sender_id", back_populates="sender")
     payments = relationship("Payment", back_populates="user")
 
+    def __repr__(self):
+        return f"<User(id={self.id}, telegram_id={self.telegram_id}, username={self.username})>"
+
 
 class Payment(Base):
     __tablename__ = "payments"
@@ -39,6 +42,9 @@ class Payment(Base):
     completed_at = Column(DateTime, nullable=True)
 
     user = relationship("User", back_populates="payments")
+
+    def __repr__(self):
+        return f"<Payment(id={self.id}, user_id={self.user_id}, amount={self.amount}, status={self.status})>"
 
 
 class AnonMessage(Base):
@@ -60,11 +66,22 @@ class AnonMessage(Base):
     receiver = relationship("User", foreign_keys=[receiver_id], back_populates="received_messages")
     reply_to = relationship("AnonMessage", remote_side=[id], backref="replies")
 
+    def __repr__(self):
+        return f"<AnonMessage(id={self.id}, sender_id={self.sender_id}, receiver_id={self.receiver_id})>"
 
-# Создаем индексы
+
+# Создаем индексы для оптимизации запросов
 Index('idx_messages_reply_to', AnonMessage.reply_to_message_id)
 Index('idx_messages_receiver', AnonMessage.receiver_id)
 Index('idx_messages_sender', AnonMessage.sender_id)
+Index('idx_messages_timestamp', AnonMessage.timestamp)
+
+Index('idx_user_telegram_id', User.telegram_id)
+Index('idx_user_anon_link', User.anon_link_uid)
 Index('idx_user_premium', User.premium_until)
+Index('idx_user_created_at', User.created_at)
+
+Index('idx_payment_user', Payment.user_id)
 Index('idx_payment_status', Payment.status)
+Index('idx_payment_created', Payment.created_at)
 Index('idx_payment_yookassa', Payment.yookassa_payment_id)
