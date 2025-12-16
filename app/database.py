@@ -3,7 +3,7 @@
 """
 import os
 import time
-from sqlalchemy import create_engine
+from sqlalchemy import create_engine, text
 from sqlalchemy.orm import sessionmaker, scoped_session
 from sqlalchemy.ext.declarative import declarative_base
 from sqlalchemy.orm import close_all_sessions
@@ -145,19 +145,19 @@ def force_reconnect():
             } if "sqlite" in DATABASE_URL else {}
         )
         
-        # 7. Тестируем подключение
+        # 7. Тестируем подключение С ИСПОЛЬЗОВАНИЕМ text()
         with new_engine.connect() as conn:
-            result = conn.execute("SELECT 1")
+            result = conn.execute(text("SELECT 1"))
             logger.info(f"✅ Тест подключения: {result.scalar()}")
             
-            # Проверяем наличие таблиц
-            result = conn.execute("SELECT name FROM sqlite_master WHERE type='table'")
+            # Проверяем наличие таблиц С ИСПОЛЬЗОВАНИЕМ text()
+            result = conn.execute(text("SELECT name FROM sqlite_master WHERE type='table'"))
             tables = [row[0] for row in result.fetchall()]
             logger.info(f"📊 Таблицы в БД после переподключения: {len(tables)} шт")
             
             # Если есть таблица users, показываем статистику
             if 'users' in tables:
-                result = conn.execute("SELECT COUNT(*) FROM users")
+                result = conn.execute(text("SELECT COUNT(*) FROM users"))
                 user_count = result.scalar()
                 logger.info(f"👥 Пользователей в БД: {user_count}")
         
@@ -183,7 +183,7 @@ def check_database_connection():
     try:
         engine = get_engine()
         with engine.connect() as conn:
-            result = conn.execute("SELECT 1")
+            result = conn.execute(text("SELECT 1"))
             return {
                 "success": True,
                 "message": "✅ Соединение с БД активно",
@@ -219,19 +219,19 @@ def get_direct_stats():
     try:
         engine = get_engine()
         with engine.connect() as conn:
-            # Пользователи
-            result = conn.execute("SELECT COUNT(*) FROM users")
+            # Пользователи - ВСЕ ЗАПРОСЫ С text()
+            result = conn.execute(text("SELECT COUNT(*) FROM users"))
             total_users = result.scalar() or 0
             
-            result = conn.execute("SELECT COUNT(*) FROM users WHERE anon_link_uid IS NOT NULL")
+            result = conn.execute(text("SELECT COUNT(*) FROM users WHERE anon_link_uid IS NOT NULL"))
             active_users = result.scalar() or 0
             
             # Сообщения
-            result = conn.execute("SELECT COUNT(*) FROM anon_messages")
+            result = conn.execute(text("SELECT COUNT(*) FROM anon_messages"))
             total_messages = result.scalar() or 0
             
             # Платежи
-            result = conn.execute("SELECT COUNT(*) FROM payments WHERE status = 'completed'")
+            result = conn.execute(text("SELECT COUNT(*) FROM payments WHERE status = 'completed'"))
             total_payments = result.scalar() or 0
             
             return {
