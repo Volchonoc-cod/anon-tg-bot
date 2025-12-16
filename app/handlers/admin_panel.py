@@ -1697,3 +1697,529 @@ async def stats_command(message: types.Message):
         
     except Exception as e:
         await message.answer(f"❌ Ошибка получения статистики: {e}")
+
+
+@router.message(Command("check_backups"), admin_filter)
+async def check_backups_command(message: Message):
+    """Проверить все бэкапы на наличие данных"""
+    try:
+        from app.database_manager import db_manager
+        
+        backups = db_manager.list_backups()
+        
+        if not backups:
+            await message.answer("📭 Бэкапы не найдены")
+            return
+        
+        response = "🔍 <b>Проверка бэкапов:</b>\n\n"
+        
+        for backup in backups[-15:]:  # Последние 15 бэкапов
+            try:
+                import sqlite3
+                conn = sqlite3.connect(backup["path"])
+                cursor = conn.cursor()
+                
+                # Проверяем таблицы
+                cursor.execute("SELECT name FROM sqlite_master WHERE type='table' ORDER BY name")
+                tables = [row[0] for row in cursor.fetchall()]
+                
+                # Проверяем пользователей
+                user_count = 0
+                if 'users' in tables:
+                    cursor.execute("SELECT COUNT(*) FROM users")
+                    user_count = cursor.fetchone()[0]
+                
+                # Проверяем сообщения
+                msg_count = 0
+                if 'anon_messages' in tables:
+                    cursor.execute("SELECT COUNT(*) FROM anon_messages")
+                    msg_count = cursor.fetchone()[0]
+                
+                conn.close()
+                
+                # Проверяем размер
+                backup_size_kb = backup["size"] / 1024
+                
+                # Определяем статус
+                if user_count > 0 and backup_size_kb > 10:  # Больше 10KB
+                    status = "✅"
+                elif backup_size_kb < 10:  # Меньше 10KB - точно пустой
+                    status = "❌ ПУСТОЙ"
+                else:
+                    status = "⚠️ СТРАННЫЙ"
+                
+                created_time = backup["created"].strftime("%d.%m %H:%M")
+                
+                response += (
+                    f"📁 <code>{backup['name']}</code>\n"
+                    f"   📅 {created_time} | 📊 {backup['size_mb']:.1f} MB\n"
+                    f"   👥 {user_count} пользователей | ✉️ {msg_count} сообщений\n"
+                    f"   📊 {len(tables)} таблиц | {status}\n\n"
+                )
+                
+            except Exception as e:
+                response += f"❌ {backup['name']}: ОШИБКА ({str(e)[:50]})\n\n"
+        
+        # Получаем информацию о текущей БД
+        current_info = db_manager.get_db_info()
+        response += (
+            f"📊 <b>Текущая БД:</b>\n"
+            f"Файл: <code>{os.path.basename(db_manager.db_path)}</code>\n"
+            f"Размер: {current_info.get('size_mb', 0):.1f} MB\n"
+            f"Пользователей: {current_info.get('table_stats', {}).get('users', 'N/A')}\n"
+            f"Сообщений: {current_info.get('table_stats', {}).get('anon_messages', 'N/A')}\n\n"
+            f"💡 <b>Что делать если бэкапы пустые:</b>\n"
+            f"1. Используйте команду /full_backup\n"
+            f"2. Остановите бота перед бэкапом\n"
+            f"3. Проверьте командами /check_backups"
+        )
+        
+        await message.answer(response, parse_mode="HTML")
+        
+    except Exception as e:
+        logger.error(f"❌ Ошибка проверки бэкапов: {e}")
+        await message.answer(f"❌ Ошибка: {str(e)[:200]}")
+
+@router.message(Command("full_backup"), admin_filter)
+async def full_backup_command(message: Message):
+    """Создать полный бэкап с данными (исправленный метод)"""
+    try:
+        await message.answer("💾 <b>Создаю ПОЛНЫЙ бэкап с данными...</b>\n\n"
+                           "⚠️ <b>Внимание:</b> Бот будет приостановлен на время создания бэкапа", 
+                           parse_mode="HTML")
+        
+        import sqlite3
+        import datetime
+        
+        # Создаем уникальное имя
+        timestamp = datetime.datetime.now().strftime("%Y%m%d_%H%M%S")
+        backup_name = f"FULL_backup_{timestamp}.db"
+        backup_path = os.path.join('backups', backup_name)
+        
+        # Показываем информацию о текущей БД
+        current_info = db_manager.get_db_info()
+        await message.answer(
+            f"📊 <b>Информация о текущей БД:</b>\n"
+            f"Файл: <code>{os.path.basename(db_manager.db_path)}</code>\n"
+            f"Размер: {current_info.get('size_mb', 0):.1f} MB\n"
+            f"Таблиц: {len(current_info.get('tables', []))}\n"
+            f"Записей: {current_info.get('total_records', 0)}",
+            parse_mode="HTML"
+        )
+        
+        # Используем правильный метод копирования
+        source_conn = None
+        backup_conn = None
+        
+        try:
+            # Подключаемся к исходной БД
+            source_conn = sqlite3.connect(db_manager.db_path)
+            
+            # Создаем новую БД для бэкапа
+            backup_conn = sqlite3.connect(backup_path)
+            
+            # Копируем ВСЮ базу данных (структура + данные)
+            source_conn.backup(backup_conn)
+            
+            logger.info(f"✅ Бэкап создан через backup API: {backup_name}")
+            
+        except Exception as backup_api_error:
+            await message.answer(f"⚠️ Backup API не сработал: {backup_api_error}\n"
+                               "Пробую альтернативный метод...")
+            
+            # Закрываем соединения если открыты
+            if source_conn:
+                source_conn.close()
+            if backup_conn:
+                backup_conn.close()
+            
+            # Метод 2: Используем shutil с задержкой
+            import time
+            time.sleep(2)  # Даем время на закрытие всех соединений
+            
+            import shutil
+            shutil.copy2(db_manager.db_path, backup_path)
+            logger.info(f"✅ Бэкап создан через прямое копирование: {backup_name}")
+        
+        finally:
+            # Закрываем соединения
+            if source_conn:
+                source_conn.close()
+            if backup_conn:
+                backup_conn.close()
+        
+        # Проверяем результат
+        if os.path.exists(backup_path):
+            backup_size = os.path.getsize(backup_path)
+            
+            # Подключаемся к бэкапу для проверки
+            check_conn = sqlite3.connect(backup_path)
+            cursor = check_conn.cursor()
+            
+            # Проверяем таблицы
+            cursor.execute("SELECT name FROM sqlite_master WHERE type='table'")
+            tables = [row[0] for row in cursor.fetchall()]
+            
+            # Проверяем пользователей
+            user_count = 0
+            if 'users' in tables:
+                cursor.execute("SELECT COUNT(*) FROM users")
+                user_count = cursor.fetchone()[0]
+            
+            # Проверяем сообщения
+            msg_count = 0
+            if 'anon_messages' in tables:
+                cursor.execute("SELECT COUNT(*) FROM anon_messages")
+                msg_count = cursor.fetchone()[0]
+            
+            check_conn.close()
+            
+            backup_size_kb = backup_size / 1024
+            backup_size_mb = backup_size / (1024 * 1024)
+            
+            await message.answer(
+                f"✅ <b>ПОЛНЫЙ бэкап создан!</b>\n\n"
+                f"📁 Файл: <code>{backup_name}</code>\n"
+                f"👥 Пользователей: <b>{user_count}</b>\n"
+                f"✉️ Сообщений: <b>{msg_count}</b>\n"
+                f"📊 Таблиц: <b>{len(tables)}</b>\n"
+                f"📦 Размер: <b>{backup_size_mb:.1f} MB</b>\n"
+                f"⏰ Время: {datetime.datetime.now().strftime('%H:%M:%S')}",
+                parse_mode="HTML"
+            )
+            
+            # Отправляем файл если он не слишком большой
+            if backup_size_mb < 50:  # Telegram лимит ~50MB
+                try:
+                    await message.answer_document(
+                        FSInputFile(backup_path),
+                        caption=f"📁 Полный бэкап с данными\n👥 {user_count} пользователей"
+                    )
+                except Exception as e:
+                    await message.answer(f"⚠️ Не удалось отправить файл (слишком большой?): {e}")
+            else:
+                await message.answer("⚠️ Файл слишком большой для отправки в Telegram")
+            
+            # Добавляем этот бэкап в менеджер
+            if user_count > 0:
+                logger.info(f"✅ Полный бэкап создан с {user_count} пользователями")
+            else:
+                await message.answer("🚨 <b>ВНИМАНИЕ:</b> В бэкапе 0 пользователей! Скорее всего проблема с созданием бэкапов.")
+                
+        else:
+            await message.answer("❌ Файл бэкапа не был создан")
+        
+    except Exception as e:
+        logger.error(f"❌ Ошибка создания полного бэкапа: {e}")
+        await message.answer(f"❌ Ошибка: {str(e)[:200]}")
+
+
+
+@router.message(F.text.startswith("/check_backup_"), admin_filter)
+async def check_specific_backup_command(message: Message):
+    """Проверить конкретный бэкап по номеру"""
+    try:
+        from app.database_manager import db_manager
+        
+        cmd_parts = message.text.split("_")
+        if len(cmd_parts) != 3:
+            await message.answer("❌ Неверный формат команды")
+            return
+        
+        try:
+            backup_index = int(cmd_parts[2])
+        except ValueError:
+            await message.answer("❌ Неверный номер бэкапа")
+            return
+        
+        backups = db_manager.list_backups()
+        if not backups:
+            await message.answer("📭 Бэкапы не найдены")
+            return
+        
+        if not 1 <= backup_index <= len(backups):
+            await message.answer(f"❌ Неверный номер бэкапа. Доступно: 1-{len(backups)}")
+            return
+        
+        selected_backup = backups[backup_index - 1]
+        
+        try:
+            import sqlite3
+            conn = sqlite3.connect(selected_backup["path"])
+            cursor = conn.cursor()
+            
+            # Получаем все таблицы
+            cursor.execute("SELECT name FROM sqlite_master WHERE type='table' ORDER BY name")
+            tables = [row[0] for row in cursor.fetchall()]
+            
+            # Собираем статистику по всем таблицам
+            table_stats = {}
+            total_records = 0
+            
+            for table in tables:
+                try:
+                    cursor.execute(f"SELECT COUNT(*) FROM {table}")
+                    count = cursor.fetchone()[0]
+                    table_stats[table] = count
+                    total_records += count
+                except:
+                    table_stats[table] = 0
+            
+            conn.close()
+            
+            created_time = selected_backup["created"].strftime("%d.%m.%Y %H:%M:%S")
+            modified_time = selected_backup["modified"].strftime("%d.%m.%Y %H:%M:%S")
+            
+            response = (
+                f"🔍 <b>Детальная проверка бэкапа:</b>\n\n"
+                f"📁 Файл: <code>{selected_backup['name']}</code>\n"
+                f"📊 Размер: {selected_backup['size_mb']:.2f} MB\n"
+                f"📅 Создан: {created_time}\n"
+                f"🔄 Изменен: {modified_time}\n"
+                f"📊 Таблиц: {len(tables)}\n"
+                f"📝 Всего записей: {total_records}\n\n"
+                f"📋 <b>Таблицы и записи:</b>\n"
+            )
+            
+            # Показываем основные таблицы
+            main_tables = ['users', 'anon_messages', 'payments']
+            for table in main_tables:
+                if table in table_stats:
+                    response += f"• {table}: <b>{table_stats[table]}</b> записей\n"
+            
+            # Показываем остальные таблицы
+            other_tables = [t for t in tables if t not in main_tables and not t.startswith('sqlite_')]
+            if other_tables:
+                response += f"\n📁 <b>Другие таблицы:</b>\n"
+                for table in other_tables[:10]:  # Первые 10
+                    response += f"• {table}: {table_stats.get(table, 0)} записей\n"
+                if len(other_tables) > 10:
+                    response += f"• ... и еще {len(other_tables) - 10} таблиц\n"
+            
+            # Сравниваем с текущей БД
+            current_info = db_manager.get_db_info()
+            current_records = current_info.get('total_records', 0)
+            
+            if current_records > 0 and total_records > 0:
+                completeness = (total_records / current_records) * 100
+                if completeness > 90:
+                    status = "✅ ХОРОШИЙ"
+                elif completeness > 50:
+                    status = "⚠️ ЧАСТИЧНЫЙ"
+                else:
+                    status = "❌ ПЛОХОЙ"
+                
+                response += f"\n📊 <b>Сравнение с текущей БД:</b>\n"
+                response += f"Записей в бэкапе: {total_records}\n"
+                response += f"Записей в текущей: {current_records}\n"
+                response += f"Полнота: {completeness:.1f}% - {status}\n"
+            
+            # Кнопка для восстановления
+            from aiogram.types import InlineKeyboardMarkup, InlineKeyboardButton
+            
+            keyboard = InlineKeyboardMarkup(
+                inline_keyboard=[
+                    [
+                        InlineKeyboardButton(
+                            text="🔄 Восстановить из этого бэкапа", 
+                            callback_data=f"restore_from_check_{backup_index}"
+                        )
+                    ],
+                    [
+                        InlineKeyboardButton(
+                            text="🗑️ Удалить этот бэкап", 
+                            callback_data=f"delete_backup_{backup_index}"
+                        )
+                    ]
+                ]
+            )
+            
+            await message.answer(response, parse_mode="HTML", reply_markup=keyboard)
+            
+        except Exception as e:
+            await message.answer(f"❌ Ошибка проверки бэкапа: {str(e)[:200]}")
+        
+    except Exception as e:
+        logger.error(f"❌ Ошибка команды check_backup: {e}")
+        await message.answer(f"❌ Ошибка: {str(e)[:200]}")
+
+@router.callback_query(F.data.startswith("restore_from_check_"))
+async def restore_from_check_callback(callback: CallbackQuery):
+    """Восстановить из бэкапа проверенного командой /check_backup"""
+    try:
+        from app.database_manager import db_manager
+        
+        backup_index = int(callback.data.replace("restore_from_check_", ""))
+        
+        backups = db_manager.list_backups()
+        if not 1 <= backup_index <= len(backups):
+            await callback.answer("❌ Неверный номер бэкапа")
+            return
+        
+        selected_backup = backups[backup_index - 1]
+        
+        await callback.message.answer(f"🔄 <b>Восстанавливаю из бэкапа:</b>\n"
+                                    f"<code>{selected_backup['name']}</code>", 
+                                    parse_mode="HTML")
+        
+        # Создаем бэкап текущей БД
+        timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+        current_backup = db_manager.create_backup(f"before_restore_{timestamp}.db", send_to_admins=False)
+        
+        if current_backup:
+            await callback.message.answer(f"💾 <b>Текущая БД сохранена:</b>\n"
+                                        f"<code>{os.path.basename(current_backup)}</code>", 
+                                        parse_mode="HTML")
+        
+        # Восстанавливаем
+        success = db_manager.restore_from_backup(selected_backup["path"])
+        
+        if success:
+            await callback.message.answer("✅ <b>БД восстановлена!</b>\n"
+                                        "🔄 Перезагружаю подключение...", 
+                                        parse_mode="HTML")
+            
+            # Перезагружаем подключение
+            force_reconnect()
+            await asyncio.sleep(2)
+            
+            # Проверяем результат
+            db_info = db_manager.get_db_info()
+            user_count = db_info.get('table_stats', {}).get('users', 0)
+            
+            await callback.message.answer(
+                f"✅ <b>Восстановление завершено!</b>\n\n"
+                f"📊 <b>Результат:</b>\n"
+                f"👥 Пользователей: <b>{user_count}</b>\n"
+                f"📦 Размер: {db_info.get('size_mb', 0):.1f} MB\n"
+                f"📊 Таблиц: {len(db_info.get('tables', []))}\n\n"
+                f"💡 <b>Используйте команды:</b>\n"
+                f"/stats - проверить статистику\n"
+                f"/admin - открыть админ-панель",
+                parse_mode="HTML"
+            )
+        else:
+            await callback.message.answer("❌ <b>Ошибка восстановления!</b>\n\n"
+                                        "Попробуйте другой бэкап или создайте новый с помощью /full_backup",
+                                        parse_mode="HTML")
+        
+        await callback.answer()
+        
+    except Exception as e:
+        logger.error(f"❌ Ошибка восстановления из проверенного бэкапа: {e}")
+        await callback.message.answer(f"❌ Ошибка: {str(e)[:200]}")
+        await callback.answer()
+
+
+
+@router.message(Command("fix_backups"), admin_filter)
+async def fix_backups_command(message: Message):
+    """Исправить все пустые бэкапы, создав новые правильные"""
+    try:
+        await message.answer("🔧 <b>Начинаю исправление бэкапов...</b>", parse_mode="HTML")
+        
+        from app.database_manager import db_manager
+        
+        # Сначала создаем правильный полный бэкап
+        await message.answer("💾 <b>Создаю правильный полный бэкап...</b>", parse_mode="HTML")
+        
+        import sqlite3
+        import datetime
+        import shutil
+        
+        timestamp = datetime.datetime.now().strftime("%Y%m%d_%H%M%S")
+        fixed_backup_name = f"FIXED_backup_{timestamp}.db"
+        fixed_backup_path = os.path.join('backups', fixed_backup_name)
+        
+        # Метод 1: Используем sqlite3 backup API
+        try:
+            source_conn = sqlite3.connect(db_manager.db_path)
+            backup_conn = sqlite3.connect(fixed_backup_path)
+            source_conn.backup(backup_conn)
+            source_conn.close()
+            backup_conn.close()
+            method = "backup API"
+        except Exception as e:
+            # Метод 2: Используем прямое копирование с задержкой
+            await message.answer(f"⚠️ Backup API не сработал, пробую прямое копирование...")
+            time.sleep(3)  # Большая задержка
+            shutil.copy2(db_manager.db_path, fixed_backup_path)
+            method = "прямое копирование"
+        
+        # Проверяем созданный бэкап
+        if os.path.exists(fixed_backup_path):
+            # Проверяем данные в бэкапе
+            check_conn = sqlite3.connect(fixed_backup_path)
+            cursor = check_conn.cursor()
+            
+            cursor.execute("SELECT COUNT(*) FROM users")
+            user_count = cursor.fetchone()[0]
+            
+            cursor.execute("SELECT COUNT(*) FROM anon_messages")
+            msg_count = cursor.fetchone()[0]
+            
+            check_conn.close()
+            
+            backup_size = os.path.getsize(fixed_backup_path) / (1024 * 1024)
+            
+            await message.answer(
+                f"✅ <b>Исправленный бэкап создан!</b>\n\n"
+                f"📁 Файл: <code>{fixed_backup_name}</code>\n"
+                f"🔧 Метод: {method}\n"
+                f"👥 Пользователей: <b>{user_count}</b>\n"
+                f"✉️ Сообщений: <b>{msg_count}</b>\n"
+                f"📦 Размер: <b>{backup_size:.1f} MB</b>\n\n",
+                parse_mode="HTML"
+            )
+            
+            # Проверяем старые бэкапы
+            backups = db_manager.list_backups()
+            empty_count = 0
+            
+            for backup in backups:
+                try:
+                    conn = sqlite3.connect(backup["path"])
+                    cursor = conn.cursor()
+                    cursor.execute("SELECT COUNT(*) FROM users")
+                    old_user_count = cursor.fetchone()[0]
+                    conn.close()
+                    
+                    if old_user_count == 0 and backup["size"] < 10240:  # Меньше 10KB
+                        empty_count += 1
+                except:
+                    pass
+            
+            if empty_count > 0:
+                await message.answer(
+                    f"⚠️ <b>Обнаружено {empty_count} пустых бэкапов!</b>\n\n"
+                    f"💡 <b>Рекомендации:</b>\n"
+                    f"1. Удалите пустые бэкапы вручную\n"
+                    f"2. Используйте только этот исправленный бэкап\n"
+                    f"3. Для новых бэкапов используйте команду /full_backup\n\n"
+                    f"📁 <b>Исправленный бэкап готов к использованию!</b>",
+                    parse_mode="HTML"
+                )
+            else:
+                await message.answer(
+                    f"✅ <b>Все бэкапы в порядке!</b>\n\n"
+                    f"📁 Исправленный бэкап создан как резервная копия.",
+                    parse_mode="HTML"
+                )
+            
+            # Отправляем исправленный бэкап
+            if backup_size < 20:  # Если меньше 20MB
+                try:
+                    await message.answer_document(
+                        FSInputFile(fixed_backup_path),
+                        caption=f"📁 ИСПРАВЛЕННЫЙ бэкап\n👥 {user_count} пользователей"
+                    )
+                except:
+                    pass
+        else:
+            await message.answer("❌ <b>Не удалось создать исправленный бэкап!</b>\n\n"
+                               "Попробуйте остановить бота и создать бэкап вручную.",
+                               parse_mode="HTML")
+        
+    except Exception as e:
+        logger.error(f"❌ Ошибка исправления бэкапов: {e}")
+        await message.answer(f"❌ Ошибка: {str(e)[:200]}")
