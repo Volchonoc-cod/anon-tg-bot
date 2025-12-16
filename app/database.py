@@ -3,7 +3,7 @@
 """
 import os
 import time
-from sqlalchemy import create_engine, text
+from sqlalchemy import create_engine, text, inspect
 from sqlalchemy.orm import sessionmaker, scoped_session
 from sqlalchemy.ext.declarative import declarative_base
 from sqlalchemy.orm import close_all_sessions
@@ -80,15 +80,151 @@ def create_tables():
     """Создает все таблицы в базе данных"""
     try:
         # Импортируем модели, чтобы они зарегистрировались у Base
-        from .models import User, AnonMessage, Payment
+        from app.models import User, AnonMessage, Payment
         Base.metadata.create_all(bind=get_engine())
         logger.info("✅ Таблицы БД созданы/проверены")
+        
+        # Проверяем что таблицы создались
+        engine = get_engine()
+        inspector = inspect(engine)
+        tables = inspector.get_table_names()
+        
+        required_tables = ['users', 'anon_messages', 'payments']
+        created_tables = []
+        missing_tables = []
+        
+        for table in required_tables:
+            if table in tables:
+                created_tables.append(table)
+            else:
+                missing_tables.append(table)
+        
+        if missing_tables:
+            logger.error(f"❌ Отсутствуют таблицы: {missing_tables}")
+            
+            # Пробуем создать недостающие таблицы вручную через SQL
+            logger.info("🔄 Создаю недостающие таблицы вручную...")
+            with engine.connect() as conn:
+                for table in missing_tables:
+                    if table == 'users':
+                        conn.execute(text('''
+                        CREATE TABLE IF NOT EXISTS users (
+                            id INTEGER PRIMARY KEY AUTOINCREMENT,
+                            telegram_id INTEGER UNIQUE NOT NULL,
+                            username TEXT,
+                            first_name TEXT NOT NULL,
+                            last_name TEXT,
+                            anon_link_uid TEXT UNIQUE,
+                            created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                            updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                            is_banned BOOLEAN DEFAULT FALSE,
+                            ban_reason TEXT,
+                            available_reveals INTEGER DEFAULT 0,
+                            total_reveals_used INTEGER DEFAULT 0
+                        )
+                        '''))
+                    elif table == 'anon_messages':
+                        conn.execute(text('''
+                        CREATE TABLE IF NOT EXISTS anon_messages (
+                            id INTEGER PRIMARY KEY AUTOINCREMENT,
+                            sender_id INTEGER,
+                            receiver_id INTEGER NOT NULL,
+                            message_text TEXT NOT NULL,
+                            message_type TEXT DEFAULT 'text',
+                            timestamp TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                            is_read BOOLEAN DEFAULT FALSE,
+                            read_at TIMESTAMP,
+                            is_revealed BOOLEAN DEFAULT FALSE,
+                            revealed_at TIMESTAMP,
+                            parent_message_id INTEGER,
+                            FOREIGN KEY (sender_id) REFERENCES users (id),
+                            FOREIGN KEY (receiver_id) REFERENCES users (id),
+                            FOREIGN KEY (parent_message_id) REFERENCES anon_messages (id)
+                        )
+                        '''))
+                    elif table == 'payments':
+                        conn.execute(text('''
+                        CREATE TABLE IF NOT EXISTS payments (
+                            id INTEGER PRIMARY KEY AUTOINCREMENT,
+                            user_id INTEGER NOT NULL,
+                            payment_id TEXT UNIQUE,
+                            payment_type TEXT NOT NULL,
+                            amount INTEGER NOT NULL,
+                            currency TEXT DEFAULT 'RUB',
+                            status TEXT DEFAULT 'pending',
+                            created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                            completed_at TIMESTAMP,
+                            metadata TEXT,
+                            FOREIGN KEY (user_id) REFERENCES users (id)
+                        )
+                        '''))
+                conn.commit()
+            
+            # Проверяем снова
+            tables = inspector.get_table_names()
+            missing_tables = [t for t in required_tables if t not in tables]
+            if missing_tables:
+                logger.error(f"❌ Не удалось создать таблицы: {missing_tables}")
+                return False
+            else:
+                logger.info("✅ Все таблицы созданы вручную")
+        
+        logger.info(f"📊 Создано таблиц: {len(created_tables)} ({', '.join(created_tables)})")
         return True
+        
     except Exception as e:
         logger.error(f"❌ Ошибка создания таблиц БД: {e}")
         import traceback
         traceback.print_exc()
         return False
+
+def init_db():
+    """Инициализация базы данных - основная функция для запуска"""
+    logger.info("🚀 ИНИЦИАЛИЗАЦИЯ БАЗЫ ДАННЫХ...")
+    
+    # Создаем директорию если ее нет
+    os.makedirs('data', exist_ok=True)
+    
+    # Создаем таблицы
+    success = create_tables()
+    
+    if success:
+        # Проверяем структуру
+        engine = get_engine()
+        inspector = inspect(engine)
+        tables = inspector.get_table_names()
+        
+        logger.info(f"📊 Итоговая структура БД: {len(tables)} таблиц")
+        for table in tables:
+            logger.info(f"  - {table}")
+            
+            # Показываем структуру таблицы
+            try:
+                columns = inspector.get_columns(table)
+                logger.info(f"    Колонки: {len(columns)}")
+                for col in columns[:3]:  # Первые 3 колонки для краткости
+                    logger.info(f"      - {col['name']} ({col['type']})")
+                if len(columns) > 3:
+                    logger.info(f"      - ... и еще {len(columns) - 3} колонок")
+            except:
+                pass
+        
+        # Проверяем количество записей
+        logger.info("📈 Проверка записей в таблицах:")
+        with engine.connect() as conn:
+            for table in tables:
+                try:
+                    result = conn.execute(text(f"SELECT COUNT(*) FROM {table}"))
+                    count = result.scalar() or 0
+                    logger.info(f"  - {table}: {count} записей")
+                except Exception as e:
+                    logger.warning(f"  - {table}: ошибка чтения ({e})")
+        
+        logger.info("✅ База данных успешно инициализирована!")
+    else:
+        logger.error("❌ Ошибка инициализации базы данных!")
+    
+    return success
 
 def force_reconnect():
     """
@@ -259,6 +395,7 @@ __all__ = [
     'get_session_local',
     'get_scoped_session',
     'create_tables',
+    'init_db',  # <-- ДОБАВЛЕНО
     'force_reconnect',
     'check_database_connection',
     'get_database_info',
