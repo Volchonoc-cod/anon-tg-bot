@@ -1,5 +1,7 @@
 from aiogram import F, Router, types, Bot  
 import os
+import sys
+import time
 from aiogram.filters import Command
 from aiogram.fsm.context import FSMContext
 from aiogram.fsm.state import State, StatesGroup
@@ -9,21 +11,22 @@ from datetime import datetime, timedelta
 import asyncio
 from aiogram.types import Message, CallbackQuery, FSInputFile
 import json
-from app.database_manager import db_manager  # Импортируем менеджер БД
-from app.database import get_db
+from app.database_manager import db_manager
+from app.database import get_db, force_reconnect, get_engine
 from app.models import User, AnonMessage, Payment
 from app.config import ADMIN_IDS
 from app.keyboards_admin import (
     admin_main_menu, admin_users_menu, admin_prices_menu,
     admin_stats_menu, admin_broadcast_menu, admin_user_actions_menu,
     admin_price_management_menu, admin_confirm_keyboard, admin_pagination_keyboard,
-    exit_admin_keyboard
+    exit_admin_keyboard, admin_settings_menu
 )
 from app.keyboards import main_menu
 from app.price_service import price_service
 from app.broadcast_service import broadcast_service
 from app.payment_service import payment_service
 import logging
+
 logger = logging.getLogger(__name__)
 
 router = Router()
@@ -37,32 +40,141 @@ class AdminStates(StatesGroup):
     waiting_price_value = State()
     waiting_discount_value = State()
     waiting_reveals_count = State()
+    waiting_balance_change = State()
+    waiting_system_message = State()
 
 def is_admin(user_id: int):
     return user_id in ADMIN_IDS
 
-# Фильтр для админов
 def admin_filter(message: Message) -> bool:
     return message.from_user.id in ADMIN_IDS
 
-# Состояния для FSM
-class BackupStates(StatesGroup):
-    waiting_backup_name = State()
-    waiting_restore_confirmation = State()
+# ==================== СИСТЕМНЫЕ КОМАНДЫ ====================
+
+@router.message(Command("admin"))
+@router.message(F.text == "👑 Админ-панель")
+async def admin_panel(message: types.Message):
+    if not is_admin(message.from_user.id):
+        await message.answer("❌ Доступ запрещен")
+        return
+
+    try:
+        engine = get_engine()
+        with engine.connect() as conn:
+            # Проверяем наличие таблиц
+            result = conn.execute("SELECT name FROM sqlite_master WHERE type='table'")
+            tables = [row[0] for row in result.fetchall()]
+            
+            if 'users' not in tables:
+                await message.answer("⚠️ <b>Таблица users не найдена</b>", parse_mode="HTML")
+                return
+            
+            # Получаем статистику напрямую через SQL
+            result = conn.execute("SELECT COUNT(*) FROM users")
+            total_users = result.scalar() or 0
+            
+            today = datetime.now().date().strftime('%Y-%m-%d')
+            result = conn.execute(f"SELECT COUNT(*) FROM users WHERE DATE(created_at) = '{today}'")
+            today_users = result.scalar() or 0
+            
+            result = conn.execute("SELECT COUNT(*) FROM anon_messages")
+            total_messages = result.scalar() or 0
+            
+            result = conn.execute(f"SELECT COUNT(*) FROM anon_messages WHERE DATE(timestamp) = '{today}'")
+            today_messages = result.scalar() or 0
+            
+            result = conn.execute("SELECT COUNT(*) FROM payments WHERE status = 'completed'")
+            total_payments = result.scalar() or 0
+            
+            result = conn.execute("SELECT COALESCE(SUM(amount), 0) FROM payments WHERE status = 'completed'")
+            total_revenue = result.scalar() or 0
+
+            week_ago = (datetime.now() - timedelta(days=7)).strftime('%Y-%m-%d')
+            result = conn.execute(f"SELECT COUNT(DISTINCT sender_id) FROM anon_messages WHERE DATE(timestamp) >= '{week_ago}'")
+            active_users = result.scalar() or 0
+
+        text = (
+            "👑 <b>Админ-панель ShadowTalk</b>\n\n"
+            "📊 <b>Ключевая статистика:</b>\n"
+            f"• 👥 Всего пользователей: <b>{total_users}</b>\n"
+            f"• 🆕 Новых сегодня: <b>{today_users}</b>\n"
+            f"• 🔥 Активных за неделю: <b>{active_users}</b>\n"
+            f"• 📨 Всего сообщений: <b>{total_messages}</b>\n"
+            f"• 📨 Сообщений сегодня: <b>{today_messages}</b>\n"
+            f"• 💰 Всего продаж: <b>{total_payments}</b>\n"
+            f"• 🏦 Общая выручка: <b>{total_revenue / 100:.2f}₽</b>\n\n"
+            "🚀 <b>Быстрые действия:</b>\n"
+            "Используйте кнопки ниже для управления ботом"
+        )
+
+        await message.answer(text, parse_mode="HTML", reply_markup=admin_main_menu())
+        
+    except Exception as e:
+        logger.error(f"Ошибка в admin_panel: {e}")
+        await message.answer(f"❌ Ошибка получения статистики: {str(e)[:200]}")
+
+# ==================== УПРАВЛЕНИЕ БАЗОЙ ДАННЫХ ====================
+
+@router.message(Command("reload_db"), admin_filter)
+async def cmd_reload_db(message: Message):
+    """Принудительно перезагрузить подключение к БД"""
+    try:
+        await message.answer("🔄 Принудительная перезагрузка подключения к БД...")
+        
+        # Перезагружаем подключение
+        force_reconnect()
+        
+        # Ждем перезагрузки
+        await asyncio.sleep(1)
+        
+        # Получаем актуальную статистику
+        engine = get_engine()
+        with engine.connect() as conn:
+            # Проверяем наличие таблиц
+            result = conn.execute("SELECT name FROM sqlite_master WHERE type='table'")
+            tables = [row[0] for row in result.fetchall()]
+            
+            # Получаем статистику
+            user_count = 0
+            message_count = 0
+            
+            if 'users' in tables:
+                result = conn.execute("SELECT COUNT(*) FROM users")
+                user_count = result.scalar() or 0
+            
+            if 'anon_messages' in tables:
+                result = conn.execute("SELECT COUNT(*) FROM anon_messages")
+                message_count = result.scalar() or 0
+        
+        # Получаем информацию о файле БД
+        db_info = db_manager.get_db_info()
+        
+        await message.answer(
+            f"✅ <b>Подключение к БД перезагружено!</b>\n\n"
+            f"📊 <b>Актуальная статистика:</b>\n"
+            f"📁 Файл: {os.path.basename(db_manager.db_path)}\n"
+            f"📦 Размер: {db_info.get('size_mb', 0):.2f} MB\n"
+            f"📂 Таблиц: {len(tables)}\n"
+            f"👥 Пользователей: {user_count}\n"
+            f"💬 Сообщений: {message_count}\n\n"
+            f"✅ <b>Теперь все модули видят актуальные данные</b>",
+            parse_mode="HTML"
+        )
+        
+    except Exception as e:
+        await message.answer(f"❌ Ошибка перезагрузки БД: {str(e)}")
 
 @router.message(Command("backup"), admin_filter)
 async def cmd_backup(message: Message):
     """Создать бэкап БД"""
     try:
-        # Показываем что начали
         await message.answer("💾 Создание бэкапа...")
         
-        # Создаем бэкап
         backup_path = db_manager.create_backup()
         
         if backup_path:
             backup_name = os.path.basename(backup_path)
-            backup_size = os.path.getsize(backup_path) / (1024 * 1024)  # MB
+            backup_size = os.path.getsize(backup_path) / (1024 * 1024)
             
             response = (
                 f"✅ <b>Бэкап создан успешно!</b>\n\n"
@@ -71,7 +183,6 @@ async def cmd_backup(message: Message):
                 f"⏰ Время: {datetime.now().strftime('%H:%M:%S')}"
             )
             
-            # Пытаемся отправить файл
             try:
                 await message.answer_document(
                     FSInputFile(backup_path),
@@ -79,14 +190,12 @@ async def cmd_backup(message: Message):
                     parse_mode="HTML"
                 )
             except:
-                # Если не получилось отправить файл, отправляем только сообщение
                 await message.answer(response, parse_mode="HTML")
         else:
-            await message.answer("❌ Не удалось создать бэкап. Проверьте логи.")
+            await message.answer("❌ Не удалось создать бэкап.")
             
     except Exception as e:
-        error_msg = str(e)[:200]  # Ограничиваем длину сообщения
-        await message.answer(f"❌ Ошибка при создании бэкапа: {error_msg}")
+        await message.answer(f"❌ Ошибка: {str(e)[:200]}")
 
 @router.message(Command("backups"), admin_filter)
 async def cmd_backups(message: Message):
@@ -98,10 +207,9 @@ async def cmd_backups(message: Message):
             await message.answer("📭 Бэкапы не найдены")
             return
         
-        # Формируем сообщение
         response = "📂 <b>Список бэкапов:</b>\n\n"
         
-        for i, backup in enumerate(reversed(backups[-10:]), 1):  # Последние 10
+        for i, backup in enumerate(reversed(backups[-10:]), 1):
             created = backup["created"].strftime("%d.%m.%Y %H:%M")
             size_mb = backup["size_mb"]
             valid = "✅" if backup["is_valid"] else "❌"
@@ -111,7 +219,6 @@ async def cmd_backups(message: Message):
                 f"   📅 {created} | 📊 {size_mb:.2f} MB | {valid}\n\n"
             )
         
-        # Добавляем статистику
         db_info = db_manager.get_db_info()
         response += (
             f"📊 <b>Статистика БД:</b>\n"
@@ -123,19 +230,18 @@ async def cmd_backups(message: Message):
         await message.answer(response, parse_mode="HTML")
         
     except Exception as e:
-        await message.answer(f"❌ Ошибка при получении списка бэкапов: {str(e)}")
+        await message.answer(f"❌ Ошибка: {str(e)}")
 
 @router.message(Command("restore"), admin_filter)
-async def cmd_restore(message: Message, state: FSMContext):
+async def cmd_restore(message: Message):
     """Восстановить БД из бэкапа"""
     try:
         backups = db_manager.list_backups()
         
         if not backups:
-            await message.answer("📭 Бэкапы не найдены для восстановления")
+            await message.answer("📭 Бэкапы не найдены")
             return
         
-        # Показываем последние 5 бэкапов
         response = "🔄 <b>Выберите бэкап для восстановления:</b>\n\n"
         
         for i, backup in enumerate(reversed(backups[-5:]), 1):
@@ -160,7 +266,6 @@ async def cmd_restore(message: Message, state: FSMContext):
 async def cmd_restore_selected(message: Message):
     """Восстановить из конкретного бэкапа"""
     try:
-        # Получаем номер бэкапа из команды
         cmd_parts = message.text.split("_")
         if len(cmd_parts) != 2:
             await message.answer("❌ Неверный формат команды")
@@ -177,23 +282,35 @@ async def cmd_restore_selected(message: Message):
             await message.answer("❌ Неверный номер бэкапа")
             return
         
-        # Выбираем бэкап (последние 5, reverse order)
         selected_backup = list(reversed(backups[-5:]))[backup_index - 1]
         
-        # Восстанавливаем
         success = db_manager.restore_from_backup(selected_backup["path"])
         
         if success:
-            # Получаем информацию о восстановленной БД
+            await message.answer("🔄 Перезагружаю подключение к БД...")
+            force_reconnect()
+            
+            await asyncio.sleep(2)
+            
             db_info = db_manager.get_db_info()
             
+            engine = get_engine()
+            with engine.connect() as conn:
+                result = conn.execute("SELECT COUNT(*) FROM users")
+                user_count = result.scalar() or 0
+                
+                result = conn.execute("SELECT COUNT(*) FROM anon_messages")
+                message_count = result.scalar() or 0
+            
             response = (
-                f"✅ <b>БД успешно восстановлена!</b>\n\n"
+                f"✅ <b>БД успешно восстановлена и перезагружена!</b>\n\n"
                 f"📁 Из: {selected_backup['name']}\n"
                 f"📅 Дата бэкапа: {selected_backup['created'].strftime('%d.%m.%Y %H:%M')}\n"
                 f"📊 Размер: {db_info.get('size_mb', 0):.2f} MB\n"
-                f"📂 Таблиц: {len(db_info.get('tables', []))}\n\n"
-                f"🔄 <b>Перезапустите бота для применения изменений!</b>"
+                f"📂 Таблиц: {len(db_info.get('tables', []))}\n"
+                f"👥 Пользователей: {user_count}\n"
+                f"💬 Сообщений: {message_count}\n\n"
+                f"✅ <b>Подключение к БД обновлено!</b>"
             )
         else:
             response = "❌ Не удалось восстановить БД"
@@ -201,147 +318,7 @@ async def cmd_restore_selected(message: Message):
         await message.answer(response, parse_mode="HTML")
         
     except Exception as e:
-        await message.answer(f"❌ Ошибка восстановления: {str(e)}")
-
-
-@router.message(Command("auto_restore"), admin_filter)
-async def auto_restore_command(message: types.Message):
-    """Запуск автоматического восстановления"""
-    await message.answer("🔄 Запуск автоматического восстановления...")
-    
-    try:
-        import subprocess
-        import sys
-        
-        result = subprocess.run(
-            [sys.executable, "auto_restore.py"],
-            capture_output=True,
-            text=True,
-            timeout=30
-        )
-        
-        if result.returncode == 0:
-            response = (
-                "✅ <b>Автовосстановление завершено!</b>\n\n"
-                f"📄 Лог:\n<code>{result.stdout[:1000] if result.stdout else 'Нет вывода'}</code>"
-            )
-        else:
-            response = (
-                "❌ <b>Автовосстановление не удалось</b>\n\n"
-                f"📄 Ошибка:\n<code>{result.stderr[:1000] if result.stderr else 'Неизвестная ошибка'}</code>"
-            )
-            
-        await message.answer(response, parse_mode="HTML")
-        
-    except Exception as e:
-        await message.answer(f"❌ Ошибка: {str(e)[:200]}")
-
-@router.message(Command("setup_auto_restore"), admin_filter)
-async def setup_auto_restore_command(message: types.Message):
-    """Настройка автовосстановления"""
-    await message.answer(
-        "⚙️ <b>Настройка автовосстановления БД</b>\n\n"
-        "📁 <b>Как это работает:</b>\n"
-        "1. При каждом деплое проверяется БД\n"
-        "2. Если БД повреждена или отсутствует\n"
-        "3. Автоматически восстанавливается из бэкапа\n"
-        "4. Или создается новая\n\n"
-        "🔧 <b>Текущие настройки:</b>\n"
-        "• Восстановление из локальных бэкапов: ✅\n"
-        "• Создание новой БД при ошибке: ✅\n"
-        "• URL для скачивания: ❌\n\n"
-        "💡 <b>Команды:</b>\n"
-        "<code>/auto_restore</code> - запустить сейчас\n"
-        "<code>/backup_now</code> - создать бэкап\n"
-        "<code>/db_status</code> - статус БД",
-        parse_mode="HTML"
-    )
-
-
-@router.message(Command("dbinfo"), admin_filter)
-async def cmd_dbinfo(message: Message):
-    """Информация о базе данных"""
-    try:
-        db_info = db_manager.get_db_info()
-        metadata = db_manager.load_metadata()
-        backups = db_manager.list_backups()
-        
-        response = "💾 <b>Информация о базе данных:</b>\n\n"
-        
-        if db_info["exists"]:
-            response += (
-                f"📁 Файл: {os.path.basename(db_manager.db_path)}\n"
-                f"📊 Размер: {db_info.get('size_mb', 0):.2f} MB\n"
-                f"📂 Таблиц: {len(db_info.get('tables', []))}\n"
-                f"📅 Изменен: {db_info.get('last_modified', 'N/A')}\n\n"
-            )
-            
-            # Статистика по таблицам
-            if db_info.get("table_stats"):
-                response += "📈 <b>Статистика таблиц:</b>\n"
-                for table, count in db_info["table_stats"].items():
-                    response += f"  {table}: {count} записей\n"
-                response += "\n"
-        
-        # Информация о бэкапах
-        response += f"📂 <b>Бэкапы:</b> {len(backups)} файлов\n"
-        if backups:
-            latest = backups[-1]
-            response += (
-                f"Последний: {latest['name']}\n"
-                f"Создан: {latest['created'].strftime('%d.%m.%Y %H:%M')}\n"
-                f"Размер: {latest['size_mb']:.2f} MB\n"
-            )
-        
-        # Метаданные
-        if metadata:
-            response += f"\n📋 <b>Метаданные:</b>\n"
-            response += f"Версия: {metadata.get('version', 'N/A')}\n"
-            response += f"Последний бэкап: {metadata.get('last_backup', 'N/A')}"
-        
-        await message.answer(response, parse_mode="HTML")
-        
-    except Exception as e:
         await message.answer(f"❌ Ошибка: {str(e)}")
-
-@router.message(Command("cleanbackups"), admin_filter)
-async def cmd_cleanbackups(message: Message):
-    """Очистить старые бэкапы"""
-    try:
-        deleted = db_manager.cleanup_old_backups()
-        
-        if deleted > 0:
-            response = f"🧹 Удалено старых бэкапов: {deleted}"
-        else:
-            response = "📭 Старых бэкапов не найдено"
-        
-        await message.answer(response)
-        
-    except Exception as e:
-        await message.answer(f"❌ Ошибка очистки бэкапов: {str(e)}")
-
-@router.message(Command("exportdb"), admin_filter)
-async def cmd_exportdb(message: Message):
-    """Экспортировать БД в SQL"""
-    try:
-        success = db_manager.export_to_sql()
-        
-        if success:
-            sql_file = 'data/database_export.sql'
-            if os.path.exists(sql_file):
-                await message.answer_document(
-                    FSInputFile(sql_file),
-                    caption="✅ БД экспортирована в SQL формат"
-                )
-            else:
-                await message.answer("✅ БД экспортирована, но файл не найден")
-        else:
-            await message.answer("❌ Ошибка экспорта БД")
-            
-    except Exception as e:
-        await message.answer(f"❌ Ошибка экспорта: {str(e)}")
-
-# ==================== ЗАГРУЗКА БАЗЫ ДАННЫХ ====================
 
 @router.message(F.document, admin_filter)
 async def handle_database_upload(message: types.Message, bot: Bot):
@@ -351,12 +328,10 @@ async def handle_database_upload(message: types.Message, bot: Bot):
 
     document = message.document
     
-    # Проверяем что это файл базы данных
     if not document.file_name or not document.file_name.endswith('.db'):
         await message.answer("❌ Можно загружать только файлы баз данных (.db)")
         return
     
-    # Лимит размера файла (100MB)
     MAX_SIZE = 100 * 1024 * 1024
     if document.file_size > MAX_SIZE:
         await message.answer(f"❌ Файл слишком большой. Максимальный размер: {MAX_SIZE // (1024*1024)}MB")
@@ -365,23 +340,19 @@ async def handle_database_upload(message: types.Message, bot: Bot):
     await message.answer("💾 Загружаю файл базы данных...")
     
     try:
-        # Создаем директорию для загрузок
         upload_dir = 'uploads'
         os.makedirs(upload_dir, exist_ok=True)
         
-        # Скачиваем файл
         file_path = os.path.join(upload_dir, document.file_name)
         
         file = await bot.get_file(document.file_id)
         await bot.download_file(file.file_path, file_path)
         
-        # Проверяем валидность базы данных
         if not db_manager.validate_backup(file_path):
             os.remove(file_path)
             await message.answer("❌ Файл не является валидной базой данных SQLite")
             return
         
-        # Получаем информацию о файле
         file_size_mb = document.file_size / (1024 * 1024)
         
         await message.answer(
@@ -428,36 +399,47 @@ async def confirm_restore_database(callback: types.CallbackQuery, bot: Bot):
     await callback.answer("🔄 Начинаю восстановление...")
     
     try:
-        # Создаем бэкап текущей БД
         await callback.message.answer("💾 Создаю резервную копию текущей БД...")
         current_backup = db_manager.create_backup("before_upload_backup.db", send_to_admins=False)
         
         if current_backup:
             await callback.message.answer(f"✅ Текущая БД сохранена: {os.path.basename(current_backup)}")
         
-        # Восстанавливаем из загруженного файла
         await callback.message.answer("🔄 Восстанавливаю базу данных...")
         
         success = db_manager.restore_from_backup(file_path)
         
         if success:
-            # Получаем информацию о восстановленной БД
+            await callback.message.answer("🔄 Перезагружаю подключение к БД...")
+            force_reconnect()
+            
+            await asyncio.sleep(2)
+            
             db_info = db_manager.get_db_info()
             
-            # Создаем бэкап восстановленной БД
+            engine = get_engine()
+            with engine.connect() as conn:
+                result = conn.execute("SELECT COUNT(*) FROM users")
+                user_count = result.scalar() or 0
+                
+                result = conn.execute("SELECT COUNT(*) FROM anon_messages")
+                message_count = result.scalar() or 0
+            
             new_backup = db_manager.create_backup("after_restore_backup.db")
             
             await callback.message.answer(
-                f"✅ <b>База данных успешно восстановлена!</b>\n\n"
+                f"✅ <b>База данных успешно восстановлена и перезагружена!</b>\n\n"
                 f"📁 Из файла: <code>{file_name}</code>\n"
                 f"📊 Размер: {db_info.get('size_mb', 0):.2f} MB\n"
                 f"📂 Таблиц: {len(db_info.get('tables', []))}\n"
+                f"👥 Пользователей: {user_count}\n"
+                f"💬 Сообщений: {message_count}\n"
                 f"📝 Записей: {db_info.get('total_records', 0)}\n\n"
-                f"🔄 <b>Перезапустите бота для применения изменений!</b>",
+                f"✅ <b>Подключение к БД обновлено!</b>\n"
+                f"👥 Теперь видно {user_count} пользователей",
                 parse_mode="HTML"
             )
             
-            # Отправляем файл БД всем админам
             try:
                 from app.config import ADMIN_IDS
                 
@@ -469,7 +451,8 @@ async def confirm_restore_database(callback: types.CallbackQuery, bot: Bot):
                             caption=(
                                 f"📁 Восстановленная база данных\n"
                                 f"⏰ {datetime.now().strftime('%H:%M:%S')}\n"
-                                f"📊 {db_info.get('size_mb', 0):.2f} MB"
+                                f"📊 {db_info.get('size_mb', 0):.2f} MB\n"
+                                f"👥 {user_count} пользователей"
                             )
                         )
                         logger.info(f"📤 БД отправлена админу {admin_id}")
@@ -482,7 +465,6 @@ async def confirm_restore_database(callback: types.CallbackQuery, bot: Bot):
         else:
             await callback.message.answer("❌ Ошибка восстановления базы данных")
         
-        # Удаляем загруженный файл
         if os.path.exists(file_path):
             try:
                 os.remove(file_path)
@@ -503,11 +485,9 @@ async def cancel_restore_database(callback: types.CallbackQuery):
         await callback.answer("❌ Доступ запрещен")
         return
     
-    # Удаляем загруженный файл если есть
     try:
         upload_dir = 'uploads'
         if os.path.exists(upload_dir):
-            # Удаляем все файлы из uploads
             for filename in os.listdir(upload_dir):
                 file_path = os.path.join(upload_dir, filename)
                 if os.path.isfile(file_path):
@@ -518,212 +498,6 @@ async def cancel_restore_database(callback: types.CallbackQuery):
     await callback.message.answer("❌ Восстановление отменено")
     await callback.answer()
 
-@router.message(Command("upload_db"), admin_filter)
-async def upload_db_command(message: types.Message):
-    """Инструкция по загрузке базы данных"""
-    await message.answer(
-        "📁 <b>Загрузка базы данных</b>\n\n"
-        "Для загрузки новой базы данных:\n"
-        "1. Отправьте мне файл <code>.db</code>\n"
-        "2. Подтвердите восстановление\n"
-        "3. Перезапустите бота командой <code>/restart</code>\n\n"
-        "⚠️ <b>Внимание:</b>\n"
-        "• Текущая БД будет заменена\n"
-        "• Создается резервная копия\n"
-        "• Максимальный размер файла: 100MB\n"
-        "• Файл должен быть SQLite базой данных\n\n"
-        "<b>Быстрые команды:</b>\n"
-        "<code>/backup_now</code> - создать backup\n"
-        "<code>/backups</code> - список бэкапов\n"
-        "<code>/upload_db</code> - загрузить БД\n"
-        "<code>/db_status</code> - статус БД",
-        parse_mode="HTML"
-    )
-
-# ==================== ИСПРАВЛЕННЫЕ ОБРАБОТЧИКИ ЦЕН ====================
-
-@router.callback_query(F.data.startswith("admin_price_edit_"))
-async def admin_price_edit_start(callback: types.CallbackQuery, state: FSMContext):
-    """Начало изменения цены"""
-    if not is_admin(callback.from_user.id):
-        await callback.answer("❌ Доступ запрещен")
-        return
-
-    package_id = callback.data.replace("admin_price_edit_", "")
-    package = price_service.get_package_info(package_id)
-    
-    await state.update_data(editing_package=package_id)
-    await state.set_state(AdminStates.waiting_price_value)
-    
-    await callback.message.answer(
-        f"💰 <b>Изменение цены для {package['name']}</b>\n\n"
-        f"Текущая цена: {price_service.format_price(package['current_price'])}\n"
-        f"Базовая цена: {price_service.format_price(package['base_price'])}\n\n"
-        "Введите новую цену в копейках (например: 1999 для 19.99₽):",
-        parse_mode="HTML"
-    )
-    await callback.answer()
-
-@router.callback_query(F.data.startswith("admin_price_discount_"))
-async def admin_price_discount_start(callback: types.CallbackQuery, state: FSMContext):
-    """Начало установки скидки"""
-    if not is_admin(callback.from_user.id):
-        await callback.answer("❌ Доступ запрещен")
-        return
-
-    package_id = callback.data.replace("admin_price_discount_", "")
-    package = price_service.get_package_info(package_id)
-    
-    await state.update_data(discount_package=package_id)
-    await state.set_state(AdminStates.waiting_discount_value)
-    
-    await callback.message.answer(
-        f"🔥 <b>Установка скидки для {package['name']}</b>\n\n"
-        f"Текущая цена: {price_service.format_price(package['current_price'])}\n"
-        f"Текущая скидка: {package['discount']}%\n\n"
-        "Введите размер скидки в процентах (0-100):",
-        parse_mode="HTML"
-    )
-    await callback.answer()
-
-@router.callback_query(F.data.startswith("admin_price_toggle_"))
-async def admin_price_toggle(callback: types.CallbackQuery):
-    """Включение/выключение пакета"""
-    if not is_admin(callback.from_user.id):
-        await callback.answer("❌ Доступ запрещен")
-        return
-
-    package_id = callback.data.replace("admin_price_toggle_", "")
-    
-    if price_service.toggle_package(package_id):
-        package = price_service.get_package_info(package_id)
-        status = "включен" if package["active"] else "выключен"
-        await callback.answer(f"✅ Пакет {package['name']} {status}!")
-        
-        # Обновляем сообщение
-        price_text = price_service.format_price(package["current_price"])
-        base_price_text = price_service.format_price(package["base_price"])
-        
-        text = (
-            f"🎯 <b>Управление пакетом</b>\n\n"
-            f"📦 <b>Название:</b> {package['name']}\n"
-            f"💰 <b>Текущая цена:</b> {price_text}\n"
-            f"🏷️ <b>Базовая цена:</b> {base_price_text}\n"
-            f"🔥 <b>Скидка:</b> {package['discount']}%\n"
-            f"📊 <b>Статус:</b> {'🟢 Активен' if package['active'] else '🔴 Выключен'}\n\n"
-            f"🔧 <b>Доступные действия:</b>"
-        )
-        
-        await callback.message.edit_text(text, parse_mode="HTML", 
-                                       reply_markup=admin_price_management_menu(package_id))
-    else:
-        await callback.answer("❌ Ошибка переключения пакета")
-
-# ==================== ВЫХОД ИЗ АДМИНКИ ====================
-
-@router.message(F.text == "🚪 Выйти из админки")
-async def exit_admin_panel(message: types.Message):
-    """Кнопка выхода из админ-панели"""
-    if not is_admin(message.from_user.id):
-        await message.answer("❌ Доступ запрещен")
-        return
-
-    await message.answer(
-        "🚪 <b>Выход из админ-панели</b>\n\n"
-        "Вы уверены, что хотите выйти из админ-панели?",
-        parse_mode="HTML",
-        reply_markup=exit_admin_keyboard()
-    )
-
-@router.callback_query(F.data == "exit_admin")
-async def exit_admin_callback(callback: types.CallbackQuery):
-    """Callback кнопка выхода из админки"""
-    if not is_admin(callback.from_user.id):
-        await callback.answer("❌ Доступ запрещен")
-        return
-
-    await callback.message.answer(
-        "🚪 <b>Выход из админ-панели</b>\n\n"
-        "Вы уверены, что хотите выйти из админ-панели?",
-        parse_mode="HTML",
-        reply_markup=exit_admin_keyboard()
-    )
-    await callback.answer()
-
-@router.callback_query(F.data == "confirm_exit_admin")
-async def confirm_exit_admin(callback: types.CallbackQuery):
-    """Подтверждение выхода из админки"""
-    if not is_admin(callback.from_user.id):
-        await callback.answer("❌ Доступ запрещен")
-        return
-
-    await callback.message.answer(
-        "✅ <b>Вы вышли из админ-панели</b>\n\n"
-        "Теперь вы в обычном режиме пользователя.",
-        parse_mode="HTML",
-        reply_markup=main_menu()
-    )
-    await callback.answer()
-
-@router.callback_query(F.data == "admin_main")
-async def admin_back_to_main(callback: types.CallbackQuery):
-    """Вернуться в главное меню админ-панели"""
-    if not is_admin(callback.from_user.id):
-        await callback.answer("❌ Доступ запрещен")
-        return
-
-    await admin_panel(callback.message)
-    await callback.answer()
-
-# ==================== ГЛАВНОЕ МЕНЮ ====================
-
-@router.message(Command("admin"))
-@router.message(F.text == "👑 Админ-панель")
-async def admin_panel(message: types.Message):
-    if not is_admin(message.from_user.id):
-        await message.answer("❌ Доступ запрещен")
-        return
-
-    db = next(get_db())
-    
-    try:
-        total_users = db.query(User).count()
-        today_users = db.query(User).filter(
-            User.created_at >= datetime.now().date()
-        ).count()
-        
-        total_messages = db.query(AnonMessage).count()
-        today_messages = db.query(AnonMessage).filter(
-            AnonMessage.timestamp >= datetime.now().date()
-        ).count()
-        
-        total_payments = db.query(Payment).filter(Payment.status == "completed").count()
-        total_revenue = db.query(func.sum(Payment.amount)).filter(Payment.status == "completed").scalar() or 0
-        
-        week_ago = datetime.now() - timedelta(days=7)
-        active_users = db.query(AnonMessage.sender_id).filter(
-            AnonMessage.timestamp >= week_ago
-        ).distinct().count()
-
-        text = (
-            "👑 <b>Админ-панель ShadowTalk</b>\n\n"
-            "📊 <b>Ключевая статистика:</b>\n"
-            f"• 👥 Всего пользователей: <b>{total_users}</b>\n"
-            f"• 🆕 Новых сегодня: <b>{today_users}</b>\n"
-            f"• 🔥 Активных за неделю: <b>{active_users}</b>\n"
-            f"• 📨 Всего сообщений: <b>{total_messages}</b>\n"
-            f"• 📨 Сообщений сегодня: <b>{today_messages}</b>\n"
-            f"• 💰 Всего продаж: <b>{total_payments}</b>\n"
-            f"• 🏦 Общая выручка: <b>{total_revenue / 100:.2f}₽</b>\n\n"
-            "🚀 <b>Быстрые действия:</b>\n"
-            "Используйте кнопки ниже для управления ботом"
-        )
-
-        await message.answer(text, parse_mode="HTML", reply_markup=admin_main_menu())
-        
-    finally:
-        db.close()
-
 # ==================== УПРАВЛЕНИЕ ПОЛЬЗОВАТЕЛЯМИ ====================
 
 @router.message(F.text == "👥 Пользователи")
@@ -732,12 +506,15 @@ async def admin_users(message: types.Message):
         await message.answer("❌ Доступ запрещен")
         return
 
-    db = next(get_db())
     try:
-        total_users = db.query(User).count()
-        today_users = db.query(User).filter(
-            User.created_at >= datetime.now().date()
-        ).count()
+        engine = get_engine()
+        with engine.connect() as conn:
+            result = conn.execute("SELECT COUNT(*) FROM users")
+            total_users = result.scalar() or 0
+            
+            today = datetime.now().date().strftime('%Y-%m-%d')
+            result = conn.execute(f"SELECT COUNT(*) FROM users WHERE DATE(created_at) = '{today}'")
+            today_users = result.scalar() or 0
         
         text = (
             f"👥 <b>Управление пользователями</b>\n\n"
@@ -750,8 +527,9 @@ async def admin_users(message: types.Message):
         
         await message.answer(text, parse_mode="HTML", reply_markup=admin_users_menu())
         
-    finally:
-        db.close()
+    except Exception as e:
+        logger.error(f"Ошибка в admin_users: {e}")
+        await message.answer(f"❌ Ошибка получения статистики: {str(e)[:200]}")
 
 @router.callback_query(F.data == "admin_users")
 async def admin_users_callback(callback: types.CallbackQuery):
@@ -760,12 +538,15 @@ async def admin_users_callback(callback: types.CallbackQuery):
         await callback.answer("❌ Доступ запрещен")
         return
 
-    db = next(get_db())
     try:
-        total_users = db.query(User).count()
-        today_users = db.query(User).filter(
-            User.created_at >= datetime.now().date()
-        ).count()
+        engine = get_engine()
+        with engine.connect() as conn:
+            result = conn.execute("SELECT COUNT(*) FROM users")
+            total_users = result.scalar() or 0
+            
+            today = datetime.now().date().strftime('%Y-%m-%d')
+            result = conn.execute(f"SELECT COUNT(*) FROM users WHERE DATE(created_at) = '{today}'")
+            today_users = result.scalar() or 0
         
         text = (
             f"👥 <b>Управление пользователями</b>\n\n"
@@ -779,8 +560,9 @@ async def admin_users_callback(callback: types.CallbackQuery):
         await callback.message.edit_text(text, parse_mode="HTML", reply_markup=admin_users_menu())
         await callback.answer()
         
-    finally:
-        db.close()
+    except Exception as e:
+        logger.error(f"Ошибка в admin_users_callback: {e}")
+        await callback.answer("❌ Произошла ошибка")
 
 @router.callback_query(F.data == "admin_users_list")
 async def admin_users_list(callback: types.CallbackQuery):
@@ -789,33 +571,48 @@ async def admin_users_list(callback: types.CallbackQuery):
         await callback.answer("❌ Доступ запрещен")
         return
 
-    db = next(get_db())
     try:
-        page = 1
-        users_per_page = 5
-        offset = (page - 1) * users_per_page
-        
-        users = db.query(User).order_by(User.created_at.desc()).offset(offset).limit(users_per_page).all()
-        total_users = db.query(User).count()
+        engine = get_engine()
+        with engine.connect() as conn:
+            page = 1
+            users_per_page = 5
+            offset = (page - 1) * users_per_page
+            
+            result = conn.execute(f"SELECT * FROM users ORDER BY created_at DESC LIMIT {users_per_page} OFFSET {offset}")
+            users = result.fetchall()
+            
+            result = conn.execute("SELECT COUNT(*) FROM users")
+            total_users = result.scalar() or 0
+            
         total_pages = (total_users + users_per_page - 1) // users_per_page
         
         text = f"📋 <b>Список пользователей</b> (страница {page}/{total_pages})\n\n"
         
         for user in users:
-            messages_count = db.query(AnonMessage).filter(
-                (AnonMessage.sender_id == user.id) | (AnonMessage.receiver_id == user.id)
-            ).count()
+            telegram_id = user[1]
+            first_name = user[3]
+            username = user[2] or "не указан"
+            available_reveals = user[10] or 0
+            created_at = user[6]
+            
+            if isinstance(created_at, str):
+                created_date = created_at[:10]
+            else:
+                created_date = created_at.strftime('%d.%m.%Y')
+            
+            with engine.connect() as conn:
+                result = conn.execute(f"SELECT COUNT(*) FROM anon_messages WHERE sender_id = {user[0]} OR receiver_id = {user[0]}")
+                messages_count = result.scalar() or 0
             
             text += (
-                f"👤 <b>{user.first_name}</b>\n"
-                f"🆔 ID: <code>{user.telegram_id}</code>\n"
+                f"👤 <b>{first_name}</b>\n"
+                f"🆔 ID: <code>{telegram_id}</code>\n"
                 f"📨 Сообщений: {messages_count}\n"
-                f"👁️ Раскрытий: {user.available_reveals}\n"
-                f"📅 Регистрация: {user.created_at.strftime('%d.%m.%Y')}\n"
+                f"👁️ Раскрытий: {available_reveals}\n"
+                f"📅 Регистрация: {created_date}\n"
                 f"────────────────────\n"
             )
         
-        # Если текст слишком длинный, обрезаем его
         if len(text) > 4096:
             text = text[:4000] + "\n... (сообщение обрезано)"
         
@@ -826,9 +623,7 @@ async def admin_users_list(callback: types.CallbackQuery):
     except Exception as e:
         logger.error(f"Ошибка в admin_users_list: {e}")
         await callback.answer("❌ Произошла ошибка")
-    finally:
-        db.close()
-        
+
 @router.callback_query(F.data.startswith("admin_page_users_"))
 async def admin_users_page(callback: types.CallbackQuery):
     """Пагинация списка пользователей"""
@@ -841,24 +636,40 @@ async def admin_users_page(callback: types.CallbackQuery):
         users_per_page = 5
         offset = (page - 1) * users_per_page
         
-        db = next(get_db())
-        users = db.query(User).order_by(User.created_at.desc()).offset(offset).limit(users_per_page).all()
-        total_users = db.query(User).count()
+        engine = get_engine()
+        with engine.connect() as conn:
+            result = conn.execute(f"SELECT * FROM users ORDER BY created_at DESC LIMIT {users_per_page} OFFSET {offset}")
+            users = result.fetchall()
+            
+            result = conn.execute("SELECT COUNT(*) FROM users")
+            total_users = result.scalar() or 0
+            
         total_pages = (total_users + users_per_page - 1) // users_per_page
         
         text = f"📋 <b>Список пользователей</b> (страница {page}/{total_pages})\n\n"
         
         for user in users:
-            messages_count = db.query(AnonMessage).filter(
-                (AnonMessage.sender_id == user.id) | (AnonMessage.receiver_id == user.id)
-            ).count()
+            telegram_id = user[1]
+            first_name = user[3]
+            username = user[2] or "не указан"
+            available_reveals = user[10] or 0
+            created_at = user[6]
+            
+            if isinstance(created_at, str):
+                created_date = created_at[:10]
+            else:
+                created_date = created_at.strftime('%d.%m.%Y')
+            
+            with engine.connect() as conn:
+                result = conn.execute(f"SELECT COUNT(*) FROM anon_messages WHERE sender_id = {user[0]} OR receiver_id = {user[0]}")
+                messages_count = result.scalar() or 0
             
             text += (
-                f"👤 <b>{user.first_name}</b>\n"
-                f"🆔 ID: <code>{user.telegram_id}</code>\n"
+                f"👤 <b>{first_name}</b>\n"
+                f"🆔 ID: <code>{telegram_id}</code>\n"
                 f"📨 Сообщений: {messages_count}\n"
-                f"👁️ Раскрытий: {user.available_reveals}\n"
-                f"📅 Регистрация: {user.created_at.strftime('%d.%m.%Y')}\n"
+                f"👁️ Раскрытий: {available_reveals}\n"
+                f"📅 Регистрация: {created_date}\n"
                 f"────────────────────\n"
             )
         
@@ -866,8 +677,9 @@ async def admin_users_page(callback: types.CallbackQuery):
                                        reply_markup=admin_pagination_keyboard(page, total_pages, "users"))
         await callback.answer()
         
-    finally:
-        db.close()
+    except Exception as e:
+        logger.error(f"Ошибка в admin_users_page: {e}")
+        await callback.answer("❌ Произошла ошибка")
 
 @router.callback_query(F.data == "admin_users_search")
 async def admin_users_search_start(callback: types.CallbackQuery, state: FSMContext):
@@ -896,22 +708,26 @@ async def admin_users_search_result(message: types.Message, state: FSMContext):
         return
 
     search_query = message.text.strip()
-    db = next(get_db())
     
     try:
+        engine = get_engine()
         users = []
         
-        if search_query.isdigit():
-            user = db.query(User).filter(User.telegram_id == int(search_query)).first()
-            if user:
-                users.append(user)
-        
-        elif search_query.startswith('@'):
-            username = search_query[1:]
-            users = db.query(User).filter(User.username.ilike(f"%{username}%")).all()
-        
-        else:
-            users = db.query(User).filter(User.first_name.ilike(f"%{search_query}%")).all()
+        with engine.connect() as conn:
+            if search_query.isdigit():
+                result = conn.execute(f"SELECT * FROM users WHERE telegram_id = {int(search_query)}")
+                user = result.fetchone()
+                if user:
+                    users.append(user)
+            
+            elif search_query.startswith('@'):
+                username = search_query[1:]
+                result = conn.execute(f"SELECT * FROM users WHERE username LIKE '%{username}%'")
+                users = result.fetchall()
+            
+            else:
+                result = conn.execute(f"SELECT * FROM users WHERE first_name LIKE '%{search_query}%'")
+                users = result.fetchall()
         
         if not users:
             await message.answer("❌ Пользователи не найдены")
@@ -920,14 +736,57 @@ async def admin_users_search_result(message: types.Message, state: FSMContext):
         
         if len(users) == 1:
             user = users[0]
-            await show_user_details(message, user)
+            
+            telegram_id = user[1]
+            first_name = user[3]
+            username = user[2] or "не указан"
+            available_reveals = user[10] or 0
+            anon_link_uid = user[5] or "нет"
+            created_at = user[6]
+            
+            with engine.connect() as conn:
+                result = conn.execute(f"SELECT COUNT(*) FROM anon_messages WHERE sender_id = {user[0]}")
+                sent_messages = result.scalar() or 0
+                
+                result = conn.execute(f"SELECT COUNT(*) FROM anon_messages WHERE receiver_id = {user[0]}")
+                received_messages = result.scalar() or 0
+                
+                result = conn.execute(f"SELECT COUNT(*) FROM payments WHERE user_id = {user[0]} AND status = 'completed'")
+                total_payments = result.scalar() or 0
+                
+                result = conn.execute(f"SELECT COALESCE(SUM(amount), 0) FROM payments WHERE user_id = {user[0]} AND status = 'completed'")
+                total_spent = result.scalar() or 0
+            
+            if isinstance(created_at, str):
+                created_date = created_at[:19].replace('T', ' ')
+            else:
+                created_date = created_at.strftime('%d.%m.%Y %H:%M')
+            
+            text = (
+                f"👤 <b>Детальная информация</b>\n\n"
+                f"🆔 <b>Telegram ID:</b> <code>{telegram_id}</code>\n"
+                f"👤 <b>Имя:</b> {first_name}\n"
+                f"🏷️ <b>Username:</b> @{username}\n"
+                f"🔗 <b>Ссылка:</b> {'✅ Активна' if anon_link_uid != 'нет' else '❌ Нет'}\n"
+                f"👁️ <b>Раскрытий:</b> {available_reveals}\n"
+                f"📅 <b>Регистрация:</b> {created_date}\n\n"
+                
+                f"📊 <b>Статистика:</b>\n"
+                f"• 📤 Отправлено сообщений: <b>{sent_messages}</b>\n"
+                f"• 📨 Получено сообщений: <b>{received_messages}</b>\n"
+                f"• 💳 Совершено покупок: <b>{total_payments}</b>\n"
+                f"• 💰 Потрачено: <b>{total_spent / 100:.2f}₽</b>\n"
+            )
+            
+            await message.answer(text, parse_mode="HTML", 
+                               reply_markup=admin_user_actions_menu(user[0]))
         else:
             text = f"🔍 <b>Найдено пользователей:</b> {len(users)}\n\n"
             for i, user in enumerate(users[:10], 1):
                 text += (
-                    f"{i}. 👤 <b>{user.first_name}</b>\n"
-                    f"   🆔 ID: <code>{user.telegram_id}</code>\n"
-                    f"   🏷️ @{user.username or 'нет'}\n"
+                    f"{i}. 👤 <b>{user[3]}</b>\n"
+                    f"   🆔 ID: <code>{user[1]}</code>\n"
+                    f"   🏷️ @{user[2] or 'нет'}\n"
                     f"   ────────────────────\n"
                 )
             
@@ -938,41 +797,10 @@ async def admin_users_search_result(message: types.Message, state: FSMContext):
         
         await state.clear()
         
-    finally:
-        db.close()
-
-async def show_user_details(message: types.Message, user: User):
-    """Показать детальную информацию о пользователе"""
-    db = next(get_db())
-    
-    try:
-        sent_messages = db.query(AnonMessage).filter(AnonMessage.sender_id == user.id).count()
-        received_messages = db.query(AnonMessage).filter(AnonMessage.receiver_id == user.id).count()
-        total_payments = db.query(Payment).filter(Payment.user_id == user.id, Payment.status == "completed").count()
-        total_spent = db.query(func.sum(Payment.amount)).filter(
-            Payment.user_id == user.id, Payment.status == "completed"
-        ).scalar() or 0
-        
-        text = (
-            f"👤 <b>Детальная информация</b>\n\n"
-            f"🆔 <b>Telegram ID:</b> <code>{user.telegram_id}</code>\n"
-            f"👤 <b>Имя:</b> {user.first_name}\n"
-            f"🏷️ <b>Username:</b> @{user.username or 'не указан'}\n"
-            f"🔗 <b>Ссылка:</b> {'✅ Активна' if user.anon_link_uid else '❌ Нет'}\n"
-            f"👁️ <b>Раскрытий:</b> {user.available_reveals}\n"
-            f"📅 <b>Регистрация:</b> {user.created_at.strftime('%d.%m.%Y %H:%M')}\n\n"
-            
-            f"📊 <b>Статистика:</b>\n"
-            f"• 📤 Отправлено сообщений: <b>{sent_messages}</b>\n"
-            f"• 📨 Получено сообщений: <b>{received_messages}</b>\n"
-            f"• 💳 Совершено покупок: <b>{total_payments}</b>\n"
-            f"• 💰 Потрачено: <b>{total_spent / 100:.2f}₽</b>\n"
-        )
-        
-        await message.answer(text, parse_mode="HTML", reply_markup=admin_user_actions_menu(user.id))
-        
-    finally:
-        db.close()
+    except Exception as e:
+        logger.error(f"Ошибка в admin_users_search_result: {e}")
+        await message.answer(f"❌ Ошибка поиска: {str(e)}")
+        await state.clear()
 
 @router.callback_query(F.data.startswith("admin_user_set_reveals_"))
 async def admin_user_set_reveals_start(callback: types.CallbackQuery, state: FSMContext):
@@ -1009,23 +837,31 @@ async def admin_user_set_reveals_finish(message: types.Message, state: FSMContex
         user_data = await state.get_data()
         user_id = user_data.get('target_user_id')
         
-        db = next(get_db())
-        user = db.query(User).filter(User.id == user_id).first()
+        # Используем ORM для обновления
+        from sqlalchemy.orm import Session
+        from app.database import get_session_local
         
-        if not user:
-            await message.answer("❌ Пользователь не найден")
-            await state.clear()
-            return
+        SessionLocal = get_session_local()
+        db = SessionLocal()
+        
+        try:
+            user = db.query(User).filter(User.id == user_id).first()
+            
+            if not user:
+                await message.answer("❌ Пользователь не найден")
+                return
 
-        if payment_service.set_reveals(db, user_id, reveals_count):
-            await message.answer(
-                f"✅ <b>Раскрытия установлены!</b>\n\n"
-                f"👤 Пользователь: {user.first_name}\n"
-                f"👁️ Количество раскрытий: {reveals_count}",
-                parse_mode="HTML"
-            )
-        else:
-            await message.answer("❌ Ошибка установки раскрытий")
+            if payment_service.set_reveals(db, user_id, reveals_count):
+                await message.answer(
+                    f"✅ <b>Раскрытия установлены!</b>\n\n"
+                    f"👤 Пользователь: {user.first_name}\n"
+                    f"👁️ Количество раскрытий: {reveals_count}",
+                    parse_mode="HTML"
+                )
+            else:
+                await message.answer("❌ Ошибка установки раскрытий")
+        finally:
+            db.close()
             
     except ValueError:
         await message.answer("❌ Введите корректное число")
@@ -1177,26 +1013,33 @@ async def admin_stats(message: types.Message):
         await message.answer("❌ Доступ запрещен")
         return
 
-    db = next(get_db())
-    
     try:
-        total_users = db.query(User).count()
-        week_ago = datetime.now() - timedelta(days=7)
-        week_users = db.query(User).filter(User.created_at >= week_ago).count()
-        
-        total_messages = db.query(AnonMessage).count()
-        week_messages = db.query(AnonMessage).filter(AnonMessage.timestamp >= week_ago).count()
-        
-        total_payments = db.query(Payment).filter(Payment.status == "completed").count()
-        total_revenue = db.query(func.sum(Payment.amount)).filter(Payment.status == "completed").scalar() or 0
-        
-        package_stats = {}
-        for package_id in price_service.get_all_packages():
-            count = db.query(Payment).filter(
-                Payment.payment_type == package_id,
-                Payment.status == "completed"
-            ).count()
-            package_stats[package_id] = count
+        engine = get_engine()
+        with engine.connect() as conn:
+            result = conn.execute("SELECT COUNT(*) FROM users")
+            total_users = result.scalar() or 0
+            
+            week_ago = (datetime.now() - timedelta(days=7)).strftime('%Y-%m-%d')
+            result = conn.execute(f"SELECT COUNT(*) FROM users WHERE DATE(created_at) >= '{week_ago}'")
+            week_users = result.scalar() or 0
+            
+            result = conn.execute("SELECT COUNT(*) FROM anon_messages")
+            total_messages = result.scalar() or 0
+            
+            result = conn.execute(f"SELECT COUNT(*) FROM anon_messages WHERE DATE(timestamp) >= '{week_ago}'")
+            week_messages = result.scalar() or 0
+            
+            result = conn.execute("SELECT COUNT(*) FROM payments WHERE status = 'completed'")
+            total_payments = result.scalar() or 0
+            
+            result = conn.execute("SELECT COALESCE(SUM(amount), 0) FROM payments WHERE status = 'completed'")
+            total_revenue = result.scalar() or 0
+            
+            package_stats = {}
+            for package_id in price_service.get_all_packages():
+                result = conn.execute(f"SELECT COUNT(*) FROM payments WHERE payment_type = '{package_id}' AND status = 'completed'")
+                count = result.scalar() or 0
+                package_stats[package_id] = count
 
         text = (
             "📊 <b>Детальная статистика</b>\n\n"
@@ -1218,8 +1061,9 @@ async def admin_stats(message: types.Message):
         
         await message.answer(text, parse_mode="HTML", reply_markup=admin_stats_menu())
         
-    finally:
-        db.close()
+    except Exception as e:
+        logger.error(f"Ошибка в admin_stats: {e}")
+        await message.answer(f"❌ Ошибка получения статистики: {str(e)[:200]}")
 
 @router.callback_query(F.data == "admin_stats")
 async def admin_stats_callback(callback: types.CallbackQuery):
@@ -1228,26 +1072,33 @@ async def admin_stats_callback(callback: types.CallbackQuery):
         await callback.answer("❌ Доступ запрещен")
         return
 
-    db = next(get_db())
-    
     try:
-        total_users = db.query(User).count()
-        week_ago = datetime.now() - timedelta(days=7)
-        week_users = db.query(User).filter(User.created_at >= week_ago).count()
-        
-        total_messages = db.query(AnonMessage).count()
-        week_messages = db.query(AnonMessage).filter(AnonMessage.timestamp >= week_ago).count()
-        
-        total_payments = db.query(Payment).filter(Payment.status == "completed").count()
-        total_revenue = db.query(func.sum(Payment.amount)).filter(Payment.status == "completed").scalar() or 0
-        
-        package_stats = {}
-        for package_id in price_service.get_all_packages():
-            count = db.query(Payment).filter(
-                Payment.payment_type == package_id,
-                Payment.status == "completed"
-            ).count()
-            package_stats[package_id] = count
+        engine = get_engine()
+        with engine.connect() as conn:
+            result = conn.execute("SELECT COUNT(*) FROM users")
+            total_users = result.scalar() or 0
+            
+            week_ago = (datetime.now() - timedelta(days=7)).strftime('%Y-%m-%d')
+            result = conn.execute(f"SELECT COUNT(*) FROM users WHERE DATE(created_at) >= '{week_ago}'")
+            week_users = result.scalar() or 0
+            
+            result = conn.execute("SELECT COUNT(*) FROM anon_messages")
+            total_messages = result.scalar() or 0
+            
+            result = conn.execute(f"SELECT COUNT(*) FROM anon_messages WHERE DATE(timestamp) >= '{week_ago}'")
+            week_messages = result.scalar() or 0
+            
+            result = conn.execute("SELECT COUNT(*) FROM payments WHERE status = 'completed'")
+            total_payments = result.scalar() or 0
+            
+            result = conn.execute("SELECT COALESCE(SUM(amount), 0) FROM payments WHERE status = 'completed'")
+            total_revenue = result.scalar() or 0
+            
+            package_stats = {}
+            for package_id in price_service.get_all_packages():
+                result = conn.execute(f"SELECT COUNT(*) FROM payments WHERE payment_type = '{package_id}' AND status = 'completed'")
+                count = result.scalar() or 0
+                package_stats[package_id] = count
 
         text = (
             "📊 <b>Детальная статистика</b>\n\n"
@@ -1270,8 +1121,9 @@ async def admin_stats_callback(callback: types.CallbackQuery):
         await callback.message.edit_text(text, parse_mode="HTML", reply_markup=admin_stats_menu())
         await callback.answer()
         
-    finally:
-        db.close()
+    except Exception as e:
+        logger.error(f"Ошибка в admin_stats_callback: {e}")
+        await callback.answer("❌ Произошла ошибка")
 
 # ==================== РАССЫЛКА ====================
 
@@ -1281,11 +1133,14 @@ async def admin_broadcast(message: types.Message):
         await message.answer("❌ Доступ запрещен")
         return
 
-    db = next(get_db())
-    
     try:
-        total_users = db.query(User).count()
-        active_users = db.query(User).filter(User.anon_link_uid.isnot(None)).count()
+        engine = get_engine()
+        with engine.connect() as conn:
+            result = conn.execute("SELECT COUNT(*) FROM users")
+            total_users = result.scalar() or 0
+            
+            result = conn.execute("SELECT COUNT(*) FROM users WHERE anon_link_uid IS NOT NULL")
+            active_users = result.scalar() or 0
         
         text = (
             "📢 <b>Система рассылок</b>\n\n"
@@ -1299,8 +1154,9 @@ async def admin_broadcast(message: types.Message):
         
         await message.answer(text, parse_mode="HTML", reply_markup=admin_broadcast_menu())
         
-    finally:
-        db.close()
+    except Exception as e:
+        logger.error(f"Ошибка в admin_broadcast: {e}")
+        await message.answer(f"❌ Ошибка получения статистики: {str(e)[:200]}")
 
 @router.callback_query(F.data == "admin_broadcast")
 async def admin_broadcast_callback(callback: types.CallbackQuery):
@@ -1309,11 +1165,14 @@ async def admin_broadcast_callback(callback: types.CallbackQuery):
         await callback.answer("❌ Доступ запрещен")
         return
 
-    db = next(get_db())
-    
     try:
-        total_users = db.query(User).count()
-        active_users = db.query(User).filter(User.anon_link_uid.isnot(None)).count()
+        engine = get_engine()
+        with engine.connect() as conn:
+            result = conn.execute("SELECT COUNT(*) FROM users")
+            total_users = result.scalar() or 0
+            
+            result = conn.execute("SELECT COUNT(*) FROM users WHERE anon_link_uid IS NOT NULL")
+            active_users = result.scalar() or 0
         
         text = (
             "📢 <b>Система рассылок</b>\n\n"
@@ -1328,8 +1187,9 @@ async def admin_broadcast_callback(callback: types.CallbackQuery):
         await callback.message.edit_text(text, parse_mode="HTML", reply_markup=admin_broadcast_menu())
         await callback.answer()
         
-    finally:
-        db.close()
+    except Exception as e:
+        logger.error(f"Ошибка в admin_broadcast_callback: {e}")
+        await callback.answer("❌ Произошла ошибка")
 
 @router.callback_query(F.data == "admin_broadcast_all")
 async def admin_broadcast_all_start(callback: types.CallbackQuery, state: FSMContext):
@@ -1436,7 +1296,7 @@ async def admin_settings(message: types.Message):
         "<code>/cleanup_old_data</code> - очистка"
     )
     
-    await message.answer(text, parse_mode="HTML")
+    await message.answer(text, parse_mode="HTML", reply_markup=admin_settings_menu())
 
 # ==================== ОБНОВЛЕНИЕ ====================
 
@@ -1449,11 +1309,51 @@ async def admin_refresh(message: types.Message):
     await admin_panel(message)
     await message.answer("✅ <b>Данные обновлены!</b>", parse_mode="HTML")
 
-# ==================== ОБРАБОТЧИК ОТМЕНЫ ВЫХОДА ====================
+# ==================== ВЫХОД ИЗ АДМИНКИ ====================
+
+@router.message(F.text == "🚪 Выйти из админки")
+async def exit_admin_panel(message: types.Message):
+    if not is_admin(message.from_user.id):
+        await message.answer("❌ Доступ запрещен")
+        return
+
+    await message.answer(
+        "🚪 <b>Выход из админ-панели</b>\n\n"
+        "Вы уверены, что хотите выйти из админ  панели?",
+        parse_mode="HTML",
+        reply_markup=exit_admin_keyboard()
+    )
+
+@router.callback_query(F.data == "exit_admin")
+async def exit_admin_callback(callback: types.CallbackQuery):
+    if not is_admin(callback.from_user.id):
+        await callback.answer("❌ Доступ запрещен")
+        return
+
+    await callback.message.answer(
+        "🚪 <b>Выход из админ-панели</b>\n\n"
+        "Вы уверены, что хотите выйти из админ-панели?",
+        parse_mode="HTML",
+        reply_markup=exit_admin_keyboard()
+    )
+    await callback.answer()
+
+@router.callback_query(F.data == "confirm_exit_admin")
+async def confirm_exit_admin(callback: types.CallbackQuery):
+    if not is_admin(callback.from_user.id):
+        await callback.answer("❌ Доступ запрещен")
+        return
+
+    await callback.message.answer(
+        "✅ <b>Вы вышли из админ-панели</b>\n\n"
+        "Теперь вы в обычном режиме пользователя.",
+        parse_mode="HTML",
+        reply_markup=main_menu()
+    )
+    await callback.answer()
 
 @router.callback_query(F.data == "admin_cancel_exit_admin")
 async def admin_cancel_exit(callback: types.CallbackQuery):
-    """Отмена выхода из админки"""
     if not is_admin(callback.from_user.id):
         await callback.answer("❌ Доступ запрещен")
         return
@@ -1461,41 +1361,196 @@ async def admin_cancel_exit(callback: types.CallbackQuery):
     await admin_panel(callback.message)
     await callback.answer("✅ Выход отменен")
 
-# ==================== АДМИНСКИЕ КОМАНДЫ ====================
-
-@router.message(Command("backup"))
-async def backup_command(message: types.Message):
-    """Создание резервной копии базы данных"""
-    if not is_admin(message.from_user.id):
-        await message.answer("❌ Доступ запрещен")
+@router.callback_query(F.data == "admin_main")
+async def admin_back_to_main(callback: types.CallbackQuery):
+    if not is_admin(callback.from_user.id):
+        await callback.answer("❌ Доступ запрещен")
         return
 
-    await message.answer("🔄 Создаю резервную копию базы данных...")
+    await admin_panel(callback.message)
+    await callback.answer()
+
+# ==================== АДМИНСКИЕ КОМАНДЫ ====================
+
+@router.message(Command("backup_now"), admin_filter)
+async def backup_now_command(message: types.Message):
+    """Немедленное создание backup"""
+    await message.answer("🔄 Создаю резервную копию...")
     
     try:
         from app.backup_service import backup_service
+        
         backup_path = backup_service.create_backup()
         
         if backup_path:
+            backup_name = os.path.basename(backup_path)
+            file_size = os.path.getsize(backup_path)
+            file_size_mb = file_size / (1024 * 1024)
+            
             await message.answer(
-                "✅ <b>Резервная копия создана!</b>\n\n"
-                f"📁 Файл: <code>{os.path.basename(backup_path)}</code>\n"
-                f"💾 Размер: {backup_service.get_db_size():.2f} MB",
+                f"✅ <b>Backup создан!</b>\n\n"
+                f"📁 Файл: <code>{backup_name}</code>\n"
+                f"📦 Размер: {file_size_mb:.2f} MB\n"
+                f"⏰ Время: {datetime.now().strftime('%H:%M:%S')}\n\n"
+                f"📤 Файл автоматически отправлен в Telegram всем админам.",
                 parse_mode="HTML"
             )
         else:
-            await message.answer("❌ Ошибка создания резервной копии")
+            await message.answer("❌ Ошибка создания backup")
             
     except Exception as e:
-        await message.answer(f"❌ Ошибка при создании резервной копии: {e}")
+        await message.answer(f"❌ Ошибка: {e}")
 
-@router.message(Command("db_status"))
+@router.message(Command("payment_status"), admin_filter)
+async def payment_status_command(message: types.Message):
+    """Статус платежной системы"""
+    try:
+        engine = get_engine()
+        with engine.connect() as conn:
+            result = conn.execute("SELECT COUNT(*) FROM payments WHERE status = 'completed'")
+            total_payments = result.scalar() or 0
+            
+            result = conn.execute("SELECT COUNT(*) FROM payments WHERE status = 'pending'")
+            pending_payments = result.scalar() or 0
+            
+            result = conn.execute("SELECT COALESCE(SUM(amount), 0) FROM payments WHERE status = 'completed'")
+            total_revenue = result.scalar() or 0
+        
+        text = (
+            "🔄 <b>Статус платежной системы</b>\n\n"
+            "❌ <b>Автоматические платежи отключены</b>\n\n"
+            f"📊 <b>Статистика:</b>\n"
+            f"• 💰 Всего продаж: <b>{total_payments}</b>\n"
+            f"• ⏳ Ожидающих платежей: <b>{pending_payments}</b>\n"
+            f"• 🏦 Общая выручка: <b>{total_revenue / 100:.2f}₽</b>\n\n"
+            "💡 <b>Рекомендации:</b>\n"
+            "Для продажи раскрытий используйте команду:\n"
+            "<code>/set_reveals ID_пользователя количество</code>"
+        )
+        
+        await message.answer(text, parse_mode="HTML")
+        
+    except Exception as e:
+        logger.error(f"Ошибка в payment_status_command: {e}")
+        await message.answer(f"❌ Ошибка получения статистики: {str(e)[:200]}")
+
+@router.message(Command("user_info"), admin_filter)
+async def user_info_command(message: types.Message):
+    """Информация о пользователе"""
+    try:
+        args = message.text.split()
+        if len(args) < 2:
+            await message.answer(
+                "❌ Использование: /user_info ID_пользователя\n\n"
+                "Пример: /user_info 123456789"
+            )
+            return
+
+        telegram_id = int(args[1])
+        
+        engine = get_engine()
+        with engine.connect() as conn:
+            result = conn.execute(f"SELECT * FROM users WHERE telegram_id = {telegram_id}")
+            user = result.fetchone()
+            
+            if not user:
+                await message.answer("❌ Пользователь не найден")
+                return
+
+            telegram_id = user[1]
+            first_name = user[3]
+            username = user[2] or "не указан"
+            available_reveals = user[10] or 0
+            anon_link_uid = user[5] or "нет"
+            created_at = user[6]
+            
+            result = conn.execute(f"SELECT COUNT(*) FROM anon_messages WHERE sender_id = {user[0]}")
+            sent_messages = result.scalar() or 0
+            
+            result = conn.execute(f"SELECT COUNT(*) FROM anon_messages WHERE receiver_id = {user[0]}")
+            received_messages = result.scalar() or 0
+            
+            result = conn.execute(f"SELECT COUNT(*) FROM payments WHERE user_id = {user[0]} AND status = 'completed'")
+            total_payments = result.scalar() or 0
+            
+            result = conn.execute(f"SELECT COALESCE(SUM(amount), 0) FROM payments WHERE user_id = {user[0]} AND status = 'completed'")
+            total_spent = result.scalar() or 0
+        
+        if isinstance(created_at, str):
+            created_date = created_at[:19].replace('T', ' ')
+        else:
+            created_date = created_at.strftime('%d.%m.%Y %H:%M')
+        
+        text = (
+            f"👤 <b>Информация о пользователе</b>\n\n"
+            f"🆔 <b>Telegram ID:</b> <code>{telegram_id}</code>\n"
+            f"👤 <b>Имя:</b> {first_name}\n"
+            f"🏷️ <b>Username:</b> @{username}\n"
+            f"🔗 <b>Ссылка:</b> {'✅ Активна' if anon_link_uid != 'нет' else '❌ Нет'}\n"
+            f"👁️ <b>Раскрытий:</b> {available_reveals}\n"
+            f"📅 <b>Регистрация:</b> {created_date}\n\n"
+            
+            f"📊 <b>Статистика:</b>\n"
+            f"• 📤 Отправлено сообщений: <b>{sent_messages}</b>\n"
+            f"• 📨 Получено сообщений: <b>{received_messages}</b>\n"
+            f"• 💳 Совершено покупок: <b>{total_payments}</b>\n"
+            f"• 💰 Потрачено: <b>{total_spent / 100:.2f}₽</b>\n"
+        )
+        
+        await message.answer(text, parse_mode="HTML")
+
+    except (IndexError, ValueError):
+        await message.answer("❌ Использование: /user_info ID_пользователя")
+    except Exception as e:
+        await message.answer(f"❌ Ошибка: {e}")
+
+@router.message(Command("set_reveals"), admin_filter)
+async def set_reveals_command(message: types.Message):
+    """Установить количество раскрытий пользователю"""
+    try:
+        args = message.text.split()
+        if len(args) < 3:
+            await message.answer(
+                "❌ Использование: /set_reveals ID_пользователя количество\n\n"
+                "Пример: /set_reveals 123456789 10"
+            )
+            return
+
+        telegram_id = int(args[1])
+        new_count = int(args[2])
+        
+        from sqlalchemy.orm import Session
+        from app.database import get_session_local
+        
+        SessionLocal = get_session_local()
+        db = SessionLocal()
+        
+        try:
+            user = db.query(User).filter(User.telegram_id == telegram_id).first()
+            if not user:
+                await message.answer("❌ Пользователь не найден")
+                return
+
+            if payment_service.set_reveals(db, user.id, new_count):
+                await message.answer(
+                    f"✅ <b>Раскрытия установлены!</b>\n\n"
+                    f"👤 Пользователь: {user.first_name}\n"
+                    f"👁️ Количество раскрытий: {new_count}",
+                    parse_mode="HTML"
+                )
+            else:
+                await message.answer("❌ Ошибка установки раскрытий")
+        finally:
+            db.close()
+
+    except (IndexError, ValueError):
+        await message.answer("❌ Использование: /set_reveals ID_пользователя количество")
+    except Exception as e:
+        await message.answer(f"❌ Ошибка: {e}")
+
+@router.message(Command("db_status"), admin_filter)
 async def db_status_command(message: types.Message):
     """Статус базы данных"""
-    if not is_admin(message.from_user.id):
-        await message.answer("❌ Доступ запрещен")
-        return
-
     try:
         from app.backup_service import backup_service
         size_mb = backup_service.get_db_size()
@@ -1522,13 +1577,9 @@ async def db_status_command(message: types.Message):
     except Exception as e:
         await message.answer(f"❌ Ошибка получения статуса БД: {e}")
 
-@router.message(Command("cleanup_old_data"))
+@router.message(Command("cleanup_old_data"), admin_filter)
 async def cleanup_old_data_command(message: types.Message):
     """Очистка старых данных"""
-    if not is_admin(message.from_user.id):
-        await message.answer("❌ Доступ запрещен")
-        return
-
     await message.answer("🔄 Очищаю старые данные...")
     
     try:
@@ -1549,167 +1600,56 @@ async def cleanup_old_data_command(message: types.Message):
     except Exception as e:
         await message.answer(f"❌ Ошибка очистки данных: {e}")
 
-@router.message(Command("user_info"))
-async def user_info_command(message: types.Message):
-    """Информация о пользователе"""
-    if not is_admin(message.from_user.id):
-        await message.answer("❌ Доступ запрещен")
-        return
+@router.message(Command("upload_db"), admin_filter)
+async def upload_db_command(message: types.Message):
+    """Инструкция по загрузке базы данных"""
+    await message.answer(
+        "📁 <b>Загрузка базы данных</b>\n\n"
+        "Для загрузки новой базы данных:\n"
+        "1. Отправьте мне файл <code>.db</code>\n"
+        "2. Подтвердите восстановление\n"
+        "3. Подключение к БД автоматически перезагрузится\n\n"
+        "⚠️ <b>Внимание:</b>\n"
+        "• Текущая БД будет заменена\n"
+        "• Создается резервная копия\n"
+        "• Максимальный размер файла: 100MB\n"
+        "• Файл должен быть SQLite базой данных\n\n"
+        "<b>Быстрые команды:</b>\n"
+        "<code>/backup_now</code> - создать backup\n"
+        "<code>/backups</code> - список бэкапов\n"
+        "<code>/upload_db</code> - загрузить БД\n"
+        "<code>/db_status</code> - статус БД\n"
+        "<code>/reload_db</code> - перезагрузить БД",
+        parse_mode="HTML"
+    )
 
+@router.message(Command("stats"), admin_filter)
+async def stats_command(message: types.Message):
+    """Быстрая статистика"""
     try:
-        args = message.text.split()
-        if len(args) < 2:
-            await message.answer(
-                "❌ Использование: /user_info ID_пользователя\n\n"
-                "Пример: /user_info 123456789"
-            )
-            return
-
-        telegram_id = int(args[1])
-        db = next(get_db())
-        
-        user = db.query(User).filter(User.telegram_id == telegram_id).first()
-        if not user:
-            await message.answer("❌ Пользователь не найден")
-            return
-
-        # Статистика пользователя
-        sent_messages = db.query(AnonMessage).filter(AnonMessage.sender_id == user.id).count()
-        received_messages = db.query(AnonMessage).filter(AnonMessage.receiver_id == user.id).count()
-        total_payments = db.query(Payment).filter(Payment.user_id == user.id, Payment.status == "completed").count()
-        total_spent = db.query(func.sum(Payment.amount)).filter(
-            Payment.user_id == user.id, Payment.status == "completed"
-        ).scalar() or 0
+        engine = get_engine()
+        with engine.connect() as conn:
+            result = conn.execute("SELECT COUNT(*) FROM users")
+            total_users = result.scalar() or 0
+            
+            result = conn.execute("SELECT COUNT(*) FROM anon_messages")
+            total_messages = result.scalar() or 0
+            
+            result = conn.execute("SELECT COUNT(*) FROM payments WHERE status = 'completed'")
+            total_payments = result.scalar() or 0
+            
+            result = conn.execute("SELECT COALESCE(SUM(amount), 0) FROM payments WHERE status = 'completed'")
+            total_revenue = result.scalar() or 0
         
         text = (
-            f"👤 <b>Информация о пользователе</b>\n\n"
-            f"🆔 <b>Telegram ID:</b> <code>{user.telegram_id}</code>\n"
-            f"👤 <b>Имя:</b> {user.first_name}\n"
-            f"🏷️ <b>Username:</b> @{user.username or 'не указан'}\n"
-            f"🔗 <b>Ссылка:</b> {'✅ Активна' if user.anon_link_uid else '❌ Нет'}\n"
-            f"👁️ <b>Раскрытий:</b> {user.available_reveals}\n"
-            f"📅 <b>Регистрация:</b> {user.created_at.strftime('%d.%m.%Y %H:%M')}\n\n"
-            
-            f"📊 <b>Статистика:</b>\n"
-            f"• 📤 Отправлено сообщений: <b>{sent_messages}</b>\n"
-            f"• 📨 Получено сообщений: <b>{received_messages}</b>\n"
-            f"• 💳 Совершено покупок: <b>{total_payments}</b>\n"
-            f"• 💰 Потрачено: <b>{total_spent / 100:.2f}₽</b>\n"
-        )
-        
-        await message.answer(text, parse_mode="HTML")
-        db.close()
-
-    except (IndexError, ValueError):
-        await message.answer("❌ Использование: /user_info ID_пользователя")
-    except Exception as e:
-        await message.answer(f"❌ Ошибка: {e}")
-
-@router.message(Command("set_reveals"))
-async def set_reveals_command(message: types.Message):
-    """Установить количество раскрытий пользователю"""
-    if not is_admin(message.from_user.id):
-        await message.answer("❌ Доступ запрещен")
-        return
-
-    try:
-        args = message.text.split()
-        if len(args) < 3:
-            await message.answer(
-                "❌ Использование: /set_reveals ID_пользователя количество\n\n"
-                "Пример: /set_reveals 123456789 10"
-            )
-            return
-
-        telegram_id = int(args[1])
-        new_count = int(args[2])
-        
-        db = next(get_db())
-        user = db.query(User).filter(User.telegram_id == telegram_id).first()
-        if not user:
-            await message.answer("❌ Пользователь не найден")
-            return
-
-        if payment_service.set_reveals(db, user.id, new_count):
-            await message.answer(
-                f"✅ <b>Раскрытия установлены!</b>\n\n"
-                f"👤 Пользователь: {user.first_name}\n"
-                f"👁️ Количество раскрытий: {new_count}",
-                parse_mode="HTML"
-            )
-        else:
-            await message.answer("❌ Ошибка установки раскрытий")
-
-        db.close()
-
-    except (IndexError, ValueError):
-        await message.answer("❌ Использование: /set_reveals ID_пользователя количество")
-    except Exception as e:
-        await message.answer(f"❌ Ошибка: {e}")
-
-
-@router.message(Command("backup_now"))
-async def backup_now_command(message: types.Message):
-    """Немедленное создание backup"""
-    if not is_admin(message.from_user.id):
-        await message.answer("❌ Доступ запрещен")
-        return
-    
-    await message.answer("🔄 Создаю резервную копию...")
-    
-    try:
-        from app.backup_service import backup_service
-        
-        # Создаем backup
-        backup_path = backup_service.create_backup()
-        
-        if backup_path:
-            backup_name = os.path.basename(backup_path)
-            file_size = os.path.getsize(backup_path)
-            file_size_mb = file_size / (1024 * 1024)
-            
-            await message.answer(
-                f"✅ <b>Backup создан!</b>\n\n"
-                f"📁 Файл: <code>{backup_name}</code>\n"
-                f"📦 Размер: {file_size_mb:.2f} MB\n"
-                f"⏰ Время: {datetime.now().strftime('%H:%M:%S')}\n\n"
-                f"📤 Файл автоматически отправлен в Telegram всем админам.",
-                parse_mode="HTML"
-            )
-        else:
-            await message.answer("❌ Ошибка создания backup")
-            
-    except Exception as e:
-        await message.answer(f"❌ Ошибка: {e}")
-
-
-
-@router.message(Command("payment_status"))
-async def payment_status_command(message: types.Message):
-    """Статус платежной системы"""
-    if not is_admin(message.from_user.id):
-        await message.answer("❌ Доступ запрещен")
-        return
-
-    db = next(get_db())
-    try:
-        total_payments = db.query(Payment).filter(Payment.status == "completed").count()
-        pending_payments = db.query(Payment).filter(Payment.status == "pending").count()
-        total_revenue = db.query(func.sum(Payment.amount)).filter(Payment.status == "completed").scalar() or 0
-        
-        text = (
-            "🔄 <b>Статус платежной системы</b>\n\n"
-            "❌ <b>Автоматические платежи отключены</b>\n\n"
-            f"📊 <b>Статистика:</b>\n"
-            f"• 💰 Всего продаж: <b>{total_payments}</b>\n"
-            f"• ⏳ Ожидающих платежей: <b>{pending_payments}</b>\n"
-            f"• 🏦 Общая выручка: <b>{total_revenue / 100:.2f}₽</b>\n\n"
-            "💡 <b>Рекомендации:</b>\n"
-            "Для продажи раскрытий используйте команду:\n"
-            "<code>/set_reveals ID_пользователя количество</code>"
+            "📊 <b>Быстрая статистика</b>\n\n"
+            f"👥 Пользователей: <b>{total_users}</b>\n"
+            f"📨 Сообщений: <b>{total_messages}</b>\n"
+            f"💰 Продаж: <b>{total_payments}</b>\n"
+            f"🏦 Выручка: <b>{total_revenue / 100:.2f}₽</b>"
         )
         
         await message.answer(text, parse_mode="HTML")
         
-    finally:
-        db.close()
+    except Exception as e:
+        await message.answer(f"❌ Ошибка получения статистики: {e}")
