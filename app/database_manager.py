@@ -176,7 +176,7 @@ class DatabaseManager:
             return None
     
     def create_backup(self, backup_name: Optional[str] = None, send_to_admins: bool = True) -> Optional[str]:
-        """Создать резервную копию базы данных"""
+        """Создать резервную копию базы данных с использованием sqlite3 backup API"""
         try:
             # Проверяем существует ли файл БД
             if not os.path.exists(self.db_path):
@@ -204,13 +204,68 @@ class DatabaseManager:
             
             logger.info(f"💾 Создание бэкапа: {backup_name}")
             
-            # Создаем бэкап
-            shutil.copy2(self.db_path, backup_path)
+            # КРИТИЧЕСКОЕ ИСПРАВЛЕНИЕ: Используем правильный метод копирования
+            # Закрываем все возможные соединения перед копированием
+            time.sleep(0.5)  # Даем время на завершение операций
             
-            # Проверяем что файл создался
+            # Метод 1: Используем sqlite3 backup API (рекомендуемый)
+            source_conn = None
+            backup_conn = None
+            
+            try:
+                # Подключаемся к исходной БД
+                source_conn = sqlite3.connect(self.db_path)
+                
+                # Создаем новую БД для бэкапа
+                backup_conn = sqlite3.connect(backup_path)
+                
+                # Копируем ВСЮ базу данных (структура + данные)
+                source_conn.backup(backup_conn)
+                
+                logger.info(f"✅ Бэкап создан через backup API: {backup_name}")
+                
+            except Exception as backup_api_error:
+                logger.warning(f"⚠️ Backup API не сработал: {backup_api_error}, пробую альтернативный метод...")
+                
+                # Закрываем соединения если открыты
+                if source_conn:
+                    source_conn.close()
+                if backup_conn:
+                    backup_conn.close()
+                
+                # Метод 2: Пробуем через временный файл с прямым копированием
+                return self._create_backup_direct(backup_path, db_size)
+            
+            finally:
+                # Закрываем соединения если они открыты
+                if source_conn:
+                    source_conn.close()
+                if backup_conn:
+                    backup_conn.close()
+            
+            # Проверяем что файл создался и не пустой
             if os.path.exists(backup_path):
                 file_size = os.path.getsize(backup_path)
+                
+                if file_size < db_size * 0.5:  # Если бэкап меньше половины оригинала
+                    logger.error(f"❌ Бэкап слишком мал: {file_size:,} байт (оригинал: {db_size:,})")
+                    
+                    # Удаляем неполный бэкап
+                    if os.path.exists(backup_path):
+                        os.remove(backup_path)
+                    
+                    # Пробуем альтернативный метод
+                    return self._create_backup_direct(backup_path, db_size)
+                
                 logger.info(f"✅ Бэкап создан: {backup_name} ({file_size:,} байт)")
+                
+                # Проверяем валидность бэкапа
+                if not self.validate_backup_full(backup_path):
+                    logger.error(f"❌ Бэкап не прошел проверку: {backup_path}")
+                    
+                    if os.path.exists(backup_path):
+                        os.remove(backup_path)
+                    return None
                 
                 # Отправляем админам если есть бот
                 if send_to_admins and self.bot:
@@ -231,7 +286,108 @@ class DatabaseManager:
                 
         except Exception as e:
             logger.error(f"❌ Ошибка создания бэкапа: {e}")
+            traceback.print_exc()
             return None
+    
+    def _create_backup_direct(self, backup_path: str, original_size: int) -> Optional[str]:
+        """Альтернативный метод создания бэкапа через прямое копирование"""
+        try:
+            logger.warning(f"⚠️ Использую прямой метод копирования: {backup_path}")
+            
+            # Закрываем все соединения и копируем файл напрямую
+            time.sleep(1)
+            
+            # Пытаемся скопировать через временный файл
+            temp_path = f"{backup_path}.tmp"
+            
+            # Копируем с проверкой
+            with open(self.db_path, 'rb') as src, open(temp_path, 'wb') as dst:
+                chunk = src.read(8192)
+                while chunk:
+                    dst.write(chunk)
+                    chunk = src.read(8192)
+            
+            # Переименовываем временный файл
+            os.rename(temp_path, backup_path)
+            
+            # Проверяем результат
+            if os.path.exists(backup_path):
+                file_size = os.path.getsize(backup_path)
+                
+                if file_size > self.min_db_size and file_size >= original_size * 0.8:
+                    logger.info(f"✅ Бэкап создан через прямое копирование: {backup_path} ({file_size:,} байт)")
+                    return backup_path
+                else:
+                    logger.error(f"❌ Бэкап слишком мал: {file_size:,} байт")
+                    if os.path.exists(backup_path):
+                        os.remove(backup_path)
+                    return None
+            else:
+                logger.error(f"❌ Файл не создан: {backup_path}")
+                return None
+                
+        except Exception as e:
+            logger.error(f"❌ Ошибка в прямом методе: {e}")
+            return None
+    
+    def validate_backup_full(self, backup_path: str) -> bool:
+        """Полная проверка бэкапа на наличие данных"""
+        try:
+            if not os.path.exists(backup_path):
+                logger.error(f"❌ Файл бэкапа не найден: {backup_path}")
+                return False
+            
+            file_size = os.path.getsize(backup_path)
+            if file_size < self.min_db_size:
+                logger.error(f"❌ Бэкап слишком мал: {file_size:,} байт")
+                return False
+            
+            # Подключаемся к бэкапу
+            conn = sqlite3.connect(backup_path)
+            cursor = conn.cursor()
+            
+            # Получаем все таблицы
+            cursor.execute("SELECT name FROM sqlite_master WHERE type='table' ORDER BY name")
+            tables = [row[0] for row in cursor.fetchall()]
+            
+            if not tables:
+                logger.error("❌ В бэкапе нет таблиц")
+                conn.close()
+                return False
+            
+            # Проверяем наличие данных в основных таблицах
+            table_stats = {}
+            has_data = False
+            
+            for table in tables:
+                try:
+                    cursor.execute(f"SELECT COUNT(*) FROM {table}")
+                    count = cursor.fetchone()[0]
+                    table_stats[table] = count
+                    
+                    if count > 0:
+                        has_data = True
+                except Exception as e:
+                    logger.warning(f"⚠️ Не удалось проверить таблицу {table}: {e}")
+                    table_stats[table] = 0
+            
+            conn.close()
+            
+            # Логируем результаты проверки
+            total_records = sum(table_stats.values())
+            logger.info(f"🔍 Проверка бэкапа: {len(tables)} таблиц, {total_records} записей")
+            
+            # Критерии валидности
+            if total_records == 0:
+                logger.error("❌ В бэкапе нет данных")
+                return False
+            
+            logger.info(f"✅ Бэкап прошел проверку: {os.path.basename(backup_path)}")
+            return True
+            
+        except Exception as e:
+            logger.error(f"❌ Ошибка проверки бэкапа: {e}")
+            return False
     
     async def _send_backup_to_admins(self, backup_path: str):
         """Отправить бэкап всем админам"""
@@ -245,10 +401,25 @@ class DatabaseManager:
             file_size = os.path.getsize(backup_path)
             file_size_mb = file_size / (1024 * 1024)
             
+            # Получаем информацию о бэкапе
+            backup_info = ""
+            try:
+                conn = sqlite3.connect(backup_path)
+                cursor = conn.cursor()
+                cursor.execute("SELECT COUNT(*) FROM users")
+                user_count = cursor.fetchone()[0]
+                cursor.execute("SELECT COUNT(*) FROM anon_messages")
+                msg_count = cursor.fetchone()[0]
+                conn.close()
+                backup_info = f"👥 Пользователей: {user_count}\n✉️ Сообщений: {msg_count}\n"
+            except:
+                backup_info = ""
+            
             caption = (
                 f"💾 <b>Новый бекап базы данных</b>\n\n"
                 f"📁 Имя: <code>{os.path.basename(backup_path)}</code>\n"
                 f"📊 Размер: {file_size_mb:.2f} MB\n"
+                f"{backup_info}"
                 f"⏰ Время: {datetime.now().strftime('%H:%M:%S')}\n\n"
                 f"💡 Для восстановления используйте команду:\n"
                 f"<code>/restore_{os.path.basename(backup_path).replace('.db', '')}</code>"
@@ -315,7 +486,7 @@ class DatabaseManager:
                 return False
             
             # Проверяем валидность бэкапа
-            if not self.validate_backup(backup_path):
+            if not self.validate_backup_full(backup_path):
                 logger.error(f"❌ Бэкап поврежден: {backup_path}")
                 return False
             
@@ -332,9 +503,44 @@ class DatabaseManager:
             # Останавливаем все соединения с БД
             time.sleep(1)  # Даем время на закрытие соединений
             
-            # Восстанавливаем из бэкапа
+            # Восстанавливаем из бэкапа с помощью sqlite3 backup API
             logger.info(f"🔄 Восстановление БД из бэкапа: {backup_path}")
-            shutil.copy2(backup_path, self.db_path)
+            
+            source_conn = None
+            target_conn = None
+            
+            try:
+                # Подключаемся к бэкапу
+                source_conn = sqlite3.connect(backup_path)
+                
+                # Подключаемся к целевой БД
+                target_conn = sqlite3.connect(self.db_path)
+                
+                # Копируем данные из бэкапа в целевую БД
+                source_conn.backup(target_conn)
+                
+                logger.info(f"✅ БД восстановлена из бэкапа через backup API")
+                
+            except Exception as e:
+                logger.warning(f"⚠️ Backup API не сработал при восстановлении: {e}")
+                
+                # Закрываем соединения
+                if source_conn:
+                    source_conn.close()
+                if target_conn:
+                    target_conn.close()
+                
+                # Пробуем прямое копирование
+                time.sleep(1)
+                shutil.copy2(backup_path, self.db_path)
+                logger.info(f"✅ БД восстановлена через прямое копирование")
+            
+            finally:
+                # Закрываем соединения
+                if source_conn:
+                    source_conn.close()
+                if target_conn:
+                    target_conn.close()
             
             # Проверяем что восстановление успешно
             if os.path.exists(self.db_path):
@@ -373,7 +579,7 @@ class DatabaseManager:
         
         # Берем последний валидный бэкап
         for backup in reversed(backups):
-            if self.validate_backup(backup["path"]):
+            if backup.get("is_valid", False):
                 latest_backup = backup["path"]
                 logger.info(f"🔄 Восстанавливаю БД из последнего валидного бэкапа: {os.path.basename(latest_backup)}")
                 return self.restore_from_backup(latest_backup)
@@ -437,7 +643,7 @@ class DatabaseManager:
             return []
     
     def validate_backup(self, backup_path: str) -> bool:
-        """Проверить валидность бэкапа"""
+        """Проверить валидность бэкапа (быстрая проверка)"""
         if not os.path.exists(backup_path):
             return False
         
@@ -466,7 +672,6 @@ class DatabaseManager:
                 logger.debug(f"⚠️ Бэкап не содержит обязательных таблиц: {backup_path}")
                 return False
             
-            logger.debug(f"✅ Бэкап валиден: {backup_path} (таблиц: {len(tables)}, обязательных: {len(found_tables)})")
             return True
             
         except Exception as e:
