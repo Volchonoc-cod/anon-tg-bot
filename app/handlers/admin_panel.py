@@ -1,3 +1,6 @@
+"""
+Админ-панель для управления ботом
+"""
 from aiogram import F, Router, types, Bot  
 import os
 import sys
@@ -6,7 +9,7 @@ from aiogram.filters import Command
 from aiogram.fsm.context import FSMContext
 from aiogram.fsm.state import State, StatesGroup
 from sqlalchemy.orm import Session
-from sqlalchemy import func, desc, text
+from sqlalchemy import text
 from datetime import datetime, timedelta
 import asyncio
 from aiogram.types import Message, CallbackQuery, FSInputFile
@@ -25,6 +28,14 @@ from app.keyboards import main_menu
 from app.price_service import price_service
 from app.broadcast_service import broadcast_service
 from app.payment_service import payment_service
+from app.database_utils import (
+    safe_execute_query,
+    get_user_by_id,
+    get_users_count,
+    get_messages_count,
+    get_payments_count,
+    get_revenue
+)
 import logging
 
 logger = logging.getLogger(__name__)
@@ -61,7 +72,7 @@ async def admin_panel(message: types.Message):
     try:
         engine = get_engine()
         with engine.connect() as conn:
-            # Проверяем наличие таблиц - С ИСПОЛЬЗОВАНИЕМ text()
+            # Проверяем наличие таблиц
             result = conn.execute(text("SELECT name FROM sqlite_master WHERE type='table'"))
             tables = [row[0] for row in result.fetchall()]
             
@@ -103,7 +114,7 @@ async def admin_panel(message: types.Message):
             )
             active_users = result.scalar() or 0
 
-        text_response = (
+        admin_message = (
             "👑 <b>Админ-панель ShadowTalk</b>\n\n"
             "📊 <b>Ключевая статистика:</b>\n"
             f"• 👥 Всего пользователей: <b>{total_users}</b>\n"
@@ -117,7 +128,7 @@ async def admin_panel(message: types.Message):
             "Используйте кнопки ниже для управления ботом"
         )
 
-        await message.answer(text_response, parse_mode="HTML", reply_markup=admin_main_menu())
+        await message.answer(admin_message, parse_mode="HTML", reply_markup=admin_main_menu())
         
     except Exception as e:
         logger.error(f"Ошибка в admin_panel: {e}")
@@ -159,7 +170,7 @@ async def cmd_reload_db(message: Message):
         # Получаем информацию о файле БД
         db_info = db_manager.get_db_info()
         
-        await message.answer(
+        response_message = (
             f"✅ <b>Подключение к БД перезагружено!</b>\n\n"
             f"📊 <b>Актуальная статистика:</b>\n"
             f"📁 Файл: {os.path.basename(db_manager.db_path)}\n"
@@ -170,6 +181,8 @@ async def cmd_reload_db(message: Message):
             f"✅ <b>Теперь все модули видят актуальные данные</b>",
             parse_mode="HTML"
         )
+        
+        await message.answer(response_message, parse_mode="HTML")
         
     except Exception as e:
         await message.answer(f"❌ Ошибка перезагрузки БД: {str(e)}")
@@ -437,7 +450,7 @@ async def confirm_restore_database(callback: types.CallbackQuery, bot: Bot):
             
             new_backup = db_manager.create_backup("after_restore_backup.db")
             
-            await callback.message.answer(
+            response_message = (
                 f"✅ <b>База данных успешно восстановлена и перезагружена!</b>\n\n"
                 f"📁 Из файла: <code>{file_name}</code>\n"
                 f"📊 Размер: {db_info.get('size_mb', 0):.2f} MB\n"
@@ -446,9 +459,10 @@ async def confirm_restore_database(callback: types.CallbackQuery, bot: Bot):
                 f"💬 Сообщений: {message_count}\n"
                 f"📝 Записей: {db_info.get('total_records', 0)}\n\n"
                 f"✅ <b>Подключение к БД обновлено!</b>\n"
-                f"👥 Теперь видно {user_count} пользователей",
-                parse_mode="HTML"
+                f"👥 Теперь видно {user_count} пользователей"
             )
+            
+            await callback.message.answer(response_message, parse_mode="HTML")
             
             try:
                 from app.config import ADMIN_IDS
@@ -517,19 +531,17 @@ async def admin_users(message: types.Message):
         return
 
     try:
-        engine = get_engine()
-        with engine.connect() as conn:
-            result = conn.execute(text("SELECT COUNT(*) FROM users"))
-            total_users = result.scalar() or 0
-            
-            today = datetime.now().date().strftime('%Y-%m-%d')
-            result = conn.execute(
-                text("SELECT COUNT(*) FROM users WHERE DATE(created_at) = :today"),
-                {"today": today}
-            )
-            today_users = result.scalar() or 0
+        # Используем функции из database_utils
+        total_users = get_users_count()
         
-        text = (
+        today = datetime.now().date()
+        result = safe_execute_query(
+            "SELECT COUNT(*) FROM users WHERE DATE(created_at) = :today",
+            {"today": today}
+        )
+        today_users = result.scalar() or 0
+        
+        users_message = (
             f"👥 <b>Управление пользователями</b>\n\n"
             f"📈 <b>Статистика:</b>\n"
             f"• Всего пользователей: <b>{total_users}</b>\n"
@@ -538,7 +550,7 @@ async def admin_users(message: types.Message):
             f"Выберите опцию ниже"
         )
         
-        await message.answer(text, parse_mode="HTML", reply_markup=admin_users_menu())
+        await message.answer(users_message, parse_mode="HTML", reply_markup=admin_users_menu())
         
     except Exception as e:
         logger.error(f"Ошибка в admin_users: {e}")
@@ -552,19 +564,16 @@ async def admin_users_callback(callback: types.CallbackQuery):
         return
 
     try:
-        engine = get_engine()
-        with engine.connect() as conn:
-            result = conn.execute(text("SELECT COUNT(*) FROM users"))
-            total_users = result.scalar() or 0
-            
-            today = datetime.now().date().strftime('%Y-%m-%d')
-            result = conn.execute(
-                text("SELECT COUNT(*) FROM users WHERE DATE(created_at) = :today"),
-                {"today": today}
-            )
-            today_users = result.scalar() or 0
+        total_users = get_users_count()
         
-        text = (
+        today = datetime.now().date()
+        result = safe_execute_query(
+            "SELECT COUNT(*) FROM users WHERE DATE(created_at) = :today",
+            {"today": today}
+        )
+        today_users = result.scalar() or 0
+        
+        response_message = (
             f"👥 <b>Управление пользователями</b>\n\n"
             f"📈 <b>Статистика:</b>\n"
             f"• Всего пользователей: <b>{total_users}</b>\n"
@@ -573,7 +582,7 @@ async def admin_users_callback(callback: types.CallbackQuery):
             f"Выберите опцию ниже"
         )
         
-        await callback.message.edit_text(text, parse_mode="HTML", reply_markup=admin_users_menu())
+        await callback.message.edit_text(response_message, parse_mode="HTML", reply_markup=admin_users_menu())
         await callback.answer()
         
     except Exception as e:
@@ -588,24 +597,21 @@ async def admin_users_list(callback: types.CallbackQuery):
         return
 
     try:
-        engine = get_engine()
-        with engine.connect() as conn:
-            page = 1
-            users_per_page = 5
-            offset = (page - 1) * users_per_page
-            
-            result = conn.execute(
-                text("SELECT * FROM users ORDER BY created_at DESC LIMIT :limit OFFSET :offset"),
-                {"limit": users_per_page, "offset": offset}
-            )
-            users = result.fetchall()
-            
-            result = conn.execute(text("SELECT COUNT(*) FROM users"))
-            total_users = result.scalar() or 0
-            
+        page = 1
+        users_per_page = 5
+        offset = (page - 1) * users_per_page
+        
+        result = safe_execute_query(
+            "SELECT * FROM users ORDER BY created_at DESC LIMIT :limit OFFSET :offset",
+            {"limit": users_per_page, "offset": offset}
+        )
+        users = result.fetchall()
+        
+        total_users = get_users_count()
+        
         total_pages = (total_users + users_per_page - 1) // users_per_page
         
-        text = f"📋 <b>Список пользователей</b> (страница {page}/{total_pages})\n\n"
+        users_message = f"📋 <b>Список пользователей</b> (страница {page}/{total_pages})\n\n"
         
         for user in users:
             user_id = user[0]
@@ -620,14 +626,13 @@ async def admin_users_list(callback: types.CallbackQuery):
             else:
                 created_date = created_at.strftime('%d.%m.%Y')
             
-            with engine.connect() as conn:
-                result = conn.execute(
-                    text("SELECT COUNT(*) FROM anon_messages WHERE sender_id = :user_id OR receiver_id = :user_id"),
-                    {"user_id": user_id}
-                )
-                messages_count = result.scalar() or 0
+            result = safe_execute_query(
+                "SELECT COUNT(*) FROM anon_messages WHERE sender_id = :user_id OR receiver_id = :user_id",
+                {"user_id": user_id}
+            )
+            messages_count = result.scalar() or 0
             
-            text += (
+            users_message += (
                 f"👤 <b>{first_name}</b>\n"
                 f"🆔 ID: <code>{telegram_id}</code>\n"
                 f"📨 Сообщений: {messages_count}\n"
@@ -636,10 +641,10 @@ async def admin_users_list(callback: types.CallbackQuery):
                 f"────────────────────\n"
             )
         
-        if len(text) > 4096:
-            text = text[:4000] + "\n... (сообщение обрезано)"
+        if len(users_message) > 4096:
+            users_message = users_message[:4000] + "\n... (сообщение обрезано)"
         
-        await callback.message.edit_text(text, parse_mode="HTML", 
+        await callback.message.edit_text(users_message, parse_mode="HTML", 
                                        reply_markup=admin_pagination_keyboard(page, total_pages, "users"))
         await callback.answer()
         
@@ -659,20 +664,17 @@ async def admin_users_page(callback: types.CallbackQuery):
         users_per_page = 5
         offset = (page - 1) * users_per_page
         
-        engine = get_engine()
-        with engine.connect() as conn:
-            result = conn.execute(
-                text("SELECT * FROM users ORDER BY created_at DESC LIMIT :limit OFFSET :offset"),
-                {"limit": users_per_page, "offset": offset}
-            )
-            users = result.fetchall()
-            
-            result = conn.execute(text("SELECT COUNT(*) FROM users"))
-            total_users = result.scalar() or 0
-            
+        result = safe_execute_query(
+            "SELECT * FROM users ORDER BY created_at DESC LIMIT :limit OFFSET :offset",
+            {"limit": users_per_page, "offset": offset}
+        )
+        users = result.fetchall()
+        
+        total_users = get_users_count()
+        
         total_pages = (total_users + users_per_page - 1) // users_per_page
         
-        text = f"📋 <b>Список пользователей</b> (страница {page}/{total_pages})\n\n"
+        users_message = f"📋 <b>Список пользователей</b> (страница {page}/{total_pages})\n\n"
         
         for user in users:
             user_id = user[0]
@@ -687,14 +689,13 @@ async def admin_users_page(callback: types.CallbackQuery):
             else:
                 created_date = created_at.strftime('%d.%m.%Y')
             
-            with engine.connect() as conn:
-                result = conn.execute(
-                    text("SELECT COUNT(*) FROM anon_messages WHERE sender_id = :user_id OR receiver_id = :user_id"),
-                    {"user_id": user_id}
-                )
-                messages_count = result.scalar() or 0
+            result = safe_execute_query(
+                "SELECT COUNT(*) FROM anon_messages WHERE sender_id = :user_id OR receiver_id = :user_id",
+                {"user_id": user_id}
+            )
+            messages_count = result.scalar() or 0
             
-            text += (
+            users_message += (
                 f"👤 <b>{first_name}</b>\n"
                 f"🆔 ID: <code>{telegram_id}</code>\n"
                 f"📨 Сообщений: {messages_count}\n"
@@ -703,7 +704,7 @@ async def admin_users_page(callback: types.CallbackQuery):
                 f"────────────────────\n"
             )
         
-        await callback.message.edit_text(text, parse_mode="HTML",
+        await callback.message.edit_text(users_message, parse_mode="HTML",
                                        reply_markup=admin_pagination_keyboard(page, total_pages, "users"))
         await callback.answer()
         
@@ -740,33 +741,31 @@ async def admin_users_search_result(message: types.Message, state: FSMContext):
     search_query = message.text.strip()
     
     try:
-        engine = get_engine()
         users = []
         
-        with engine.connect() as conn:
-            if search_query.isdigit():
-                result = conn.execute(
-                    text("SELECT * FROM users WHERE telegram_id = :telegram_id"),
-                    {"telegram_id": int(search_query)}
-                )
-                user = result.fetchone()
-                if user:
-                    users.append(user)
-            
-            elif search_query.startswith('@'):
-                username = search_query[1:]
-                result = conn.execute(
-                    text("SELECT * FROM users WHERE username LIKE :username"),
-                    {"username": f"%{username}%"}
-                )
-                users = result.fetchall()
-            
-            else:
-                result = conn.execute(
-                    text("SELECT * FROM users WHERE first_name LIKE :first_name"),
-                    {"first_name": f"%{search_query}%"}
-                )
-                users = result.fetchall()
+        if search_query.isdigit():
+            result = safe_execute_query(
+                "SELECT * FROM users WHERE telegram_id = :telegram_id",
+                {"telegram_id": int(search_query)}
+            )
+            user = result.fetchone()
+            if user:
+                users.append(user)
+        
+        elif search_query.startswith('@'):
+            username = search_query[1:]
+            result = safe_execute_query(
+                "SELECT * FROM users WHERE username LIKE :username",
+                {"username": f"%{username}%"}
+            )
+            users = result.fetchall()
+        
+        else:
+            result = safe_execute_query(
+                "SELECT * FROM users WHERE first_name LIKE :first_name",
+                {"first_name": f"%{search_query}%"}
+            )
+            users = result.fetchall()
         
         if not users:
             await message.answer("❌ Пользователи не найдены")
@@ -783,37 +782,36 @@ async def admin_users_search_result(message: types.Message, state: FSMContext):
             anon_link_uid = user[5] or "нет"
             created_at = user[6]
             
-            with engine.connect() as conn:
-                result = conn.execute(
-                    text("SELECT COUNT(*) FROM anon_messages WHERE sender_id = :user_id"),
-                    {"user_id": user_id}
-                )
-                sent_messages = result.scalar() or 0
-                
-                result = conn.execute(
-                    text("SELECT COUNT(*) FROM anon_messages WHERE receiver_id = :user_id"),
-                    {"user_id": user_id}
-                )
-                received_messages = result.scalar() or 0
-                
-                result = conn.execute(
-                    text("SELECT COUNT(*) FROM payments WHERE user_id = :user_id AND status = 'completed'"),
-                    {"user_id": user_id}
-                )
-                total_payments = result.scalar() or 0
-                
-                result = conn.execute(
-                    text("SELECT COALESCE(SUM(amount), 0) FROM payments WHERE user_id = :user_id AND status = 'completed'"),
-                    {"user_id": user_id}
-                )
-                total_spent = result.scalar() or 0
+            result = safe_execute_query(
+                "SELECT COUNT(*) FROM anon_messages WHERE sender_id = :user_id",
+                {"user_id": user_id}
+            )
+            sent_messages = result.scalar() or 0
+            
+            result = safe_execute_query(
+                "SELECT COUNT(*) FROM anon_messages WHERE receiver_id = :user_id",
+                {"user_id": user_id}
+            )
+            received_messages = result.scalar() or 0
+            
+            result = safe_execute_query(
+                "SELECT COUNT(*) FROM payments WHERE user_id = :user_id AND status = 'completed'",
+                {"user_id": user_id}
+            )
+            total_payments = result.scalar() or 0
+            
+            result = safe_execute_query(
+                "SELECT COALESCE(SUM(amount), 0) FROM payments WHERE user_id = :user_id AND status = 'completed'",
+                {"user_id": user_id}
+            )
+            total_spent = result.scalar() or 0
             
             if isinstance(created_at, str):
                 created_date = created_at[:19].replace('T', ' ')
             else:
                 created_date = created_at.strftime('%d.%m.%Y %H:%M')
             
-            text = (
+            user_info = (
                 f"👤 <b>Детальная информация</b>\n\n"
                 f"🆔 <b>Telegram ID:</b> <code>{telegram_id}</code>\n"
                 f"👤 <b>Имя:</b> {first_name}\n"
@@ -829,12 +827,12 @@ async def admin_users_search_result(message: types.Message, state: FSMContext):
                 f"• 💰 Потрачено: <b>{total_spent / 100:.2f}₽</b>\n"
             )
             
-            await message.answer(text, parse_mode="HTML", 
+            await message.answer(user_info, parse_mode="HTML", 
                                reply_markup=admin_user_actions_menu(user_id))
         else:
-            text = f"🔍 <b>Найдено пользователей:</b> {len(users)}\n\n"
+            users_found = f"🔍 <b>Найдено пользователей:</b> {len(users)}\n\n"
             for i, user in enumerate(users[:10], 1):
-                text += (
+                users_found += (
                     f"{i}. 👤 <b>{user[3]}</b>\n"
                     f"   🆔 ID: <code>{user[1]}</code>\n"
                     f"   🏷️ @{user[2] or 'нет'}\n"
@@ -842,9 +840,9 @@ async def admin_users_search_result(message: types.Message, state: FSMContext):
                 )
             
             if len(users) > 10:
-                text += f"\n⚠️ Показано первых 10 из {len(users)} результатов"
+                users_found += f"\n⚠️ Показано первых 10 из {len(users)} результатов"
             
-            await message.answer(text, parse_mode="HTML")
+            await message.answer(users_found, parse_mode="HTML")
         
         await state.clear()
         
@@ -888,8 +886,6 @@ async def admin_user_set_reveals_finish(message: types.Message, state: FSMContex
         user_data = await state.get_data()
         user_id = user_data.get('target_user_id')
         
-        # Используем ORM для обновления
-        from sqlalchemy.orm import Session
         from app.database import get_session_local
         
         SessionLocal = get_session_local()
@@ -927,7 +923,7 @@ async def admin_prices(message: types.Message):
         await message.answer("❌ Доступ запрещен")
         return
 
-    text = (
+    prices_message = (
         "💰 <b>Управление ценами</b>\n\n"
         "🎯 <b>Доступные пакеты:</b>\n"
         "Управляйте ценами и скидками на раскрытия\n\n"
@@ -937,7 +933,7 @@ async def admin_prices(message: types.Message):
         "• Включение/выключение пакетов\n"
     )
     
-    await message.answer(text, parse_mode="HTML", reply_markup=admin_prices_menu())
+    await message.answer(prices_message, parse_mode="HTML", reply_markup=admin_prices_menu())
 
 @router.callback_query(F.data == "admin_prices")
 async def admin_prices_callback(callback: types.CallbackQuery):
@@ -946,7 +942,7 @@ async def admin_prices_callback(callback: types.CallbackQuery):
         await callback.answer("❌ Доступ запрещен")
         return
 
-    text = (
+    prices_message = (
         "💰 <b>Управление ценами</b>\n\n"
         "🎯 <b>Доступные пакеты:</b>\n"
         "Управляйте ценами и скидками на раскрытия\n\n"
@@ -956,7 +952,7 @@ async def admin_prices_callback(callback: types.CallbackQuery):
         "• Включение/выключение пакетов\n"
     )
     
-    await callback.message.edit_text(text, parse_mode="HTML", reply_markup=admin_prices_menu())
+    await callback.message.edit_text(prices_message, parse_mode="HTML", reply_markup=admin_prices_menu())
     await callback.answer()
 
 @router.callback_query(F.data.startswith("admin_price_"))
@@ -976,7 +972,7 @@ async def admin_price_actions(callback: types.CallbackQuery):
             price_text = price_service.format_price(package["current_price"])
             base_price_text = price_service.format_price(package["base_price"])
             
-            text = (
+            package_message = (
                 f"🎯 <b>Управление пакетом</b>\n\n"
                 f"📦 <b>Название:</b> {package['name']}\n"
                 f"💰 <b>Текущая цена:</b> {price_text}\n"
@@ -986,7 +982,7 @@ async def admin_price_actions(callback: types.CallbackQuery):
                 f"🔧 <b>Доступные действия:</b>"
             )
             
-            await callback.message.edit_text(text, parse_mode="HTML", 
+            await callback.message.edit_text(package_message, parse_mode="HTML", 
                                            reply_markup=admin_price_management_menu(package_id))
     
     await callback.answer()
@@ -1065,43 +1061,36 @@ async def admin_stats(message: types.Message):
         return
 
     try:
-        engine = get_engine()
-        with engine.connect() as conn:
-            result = conn.execute(text("SELECT COUNT(*) FROM users"))
-            total_users = result.scalar() or 0
-            
-            week_ago = (datetime.now() - timedelta(days=7)).strftime('%Y-%m-%d')
-            result = conn.execute(
-                text("SELECT COUNT(*) FROM users WHERE DATE(created_at) >= :week_ago"),
-                {"week_ago": week_ago}
+        total_users = get_users_count()
+        
+        week_ago = (datetime.now() - timedelta(days=7)).strftime('%Y-%m-%d')
+        result = safe_execute_query(
+            "SELECT COUNT(*) FROM users WHERE DATE(created_at) >= :week_ago",
+            {"week_ago": week_ago}
+        )
+        week_users = result.scalar() or 0
+        
+        total_messages = get_messages_count()
+        
+        result = safe_execute_query(
+            "SELECT COUNT(*) FROM anon_messages WHERE DATE(timestamp) >= :week_ago",
+            {"week_ago": week_ago}
+        )
+        week_messages = result.scalar() or 0
+        
+        total_payments = get_payments_count()
+        total_revenue = get_revenue()
+        
+        package_stats = {}
+        for package_id in price_service.get_all_packages():
+            result = safe_execute_query(
+                "SELECT COUNT(*) FROM payments WHERE payment_type = :package_id AND status = 'completed'",
+                {"package_id": package_id}
             )
-            week_users = result.scalar() or 0
-            
-            result = conn.execute(text("SELECT COUNT(*) FROM anon_messages"))
-            total_messages = result.scalar() or 0
-            
-            result = conn.execute(
-                text("SELECT COUNT(*) FROM anon_messages WHERE DATE(timestamp) >= :week_ago"),
-                {"week_ago": week_ago}
-            )
-            week_messages = result.scalar() or 0
-            
-            result = conn.execute(text("SELECT COUNT(*) FROM payments WHERE status = 'completed'"))
-            total_payments = result.scalar() or 0
-            
-            result = conn.execute(text("SELECT COALESCE(SUM(amount), 0) FROM payments WHERE status = 'completed'"))
-            total_revenue = result.scalar() or 0
-            
-            package_stats = {}
-            for package_id in price_service.get_all_packages():
-                result = conn.execute(
-                    text("SELECT COUNT(*) FROM payments WHERE payment_type = :package_id AND status = 'completed'"),
-                    {"package_id": package_id}
-                )
-                count = result.scalar() or 0
-                package_stats[package_id] = count
+            count = result.scalar() or 0
+            package_stats[package_id] = count
 
-        text = (
+        stats_message = (
             "📊 <b>Детальная статистика</b>\n\n"
             "👥 <b>Пользователи:</b>\n"
             f"• Всего: <b>{total_users}</b>\n"
@@ -1117,9 +1106,9 @@ async def admin_stats(message: types.Message):
         
         for package_id, count in package_stats.items():
             package = price_service.get_package_info(package_id)
-            text += f"• {package['name']}: <b>{count}</b>\n"
+            stats_message += f"• {package['name']}: <b>{count}</b>\n"
         
-        await message.answer(text, parse_mode="HTML", reply_markup=admin_stats_menu())
+        await message.answer(stats_message, parse_mode="HTML", reply_markup=admin_stats_menu())
         
     except Exception as e:
         logger.error(f"Ошибка в admin_stats: {e}")
@@ -1133,43 +1122,36 @@ async def admin_stats_callback(callback: types.CallbackQuery):
         return
 
     try:
-        engine = get_engine()
-        with engine.connect() as conn:
-            result = conn.execute(text("SELECT COUNT(*) FROM users"))
-            total_users = result.scalar() or 0
-            
-            week_ago = (datetime.now() - timedelta(days=7)).strftime('%Y-%m-%d')
-            result = conn.execute(
-                text("SELECT COUNT(*) FROM users WHERE DATE(created_at) >= :week_ago"),
-                {"week_ago": week_ago}
+        total_users = get_users_count()
+        
+        week_ago = (datetime.now() - timedelta(days=7)).strftime('%Y-%m-%d')
+        result = safe_execute_query(
+            "SELECT COUNT(*) FROM users WHERE DATE(created_at) >= :week_ago",
+            {"week_ago": week_ago}
+        )
+        week_users = result.scalar() or 0
+        
+        total_messages = get_messages_count()
+        
+        result = safe_execute_query(
+            "SELECT COUNT(*) FROM anon_messages WHERE DATE(timestamp) >= :week_ago",
+            {"week_ago": week_ago}
+        )
+        week_messages = result.scalar() or 0
+        
+        total_payments = get_payments_count()
+        total_revenue = get_revenue()
+        
+        package_stats = {}
+        for package_id in price_service.get_all_packages():
+            result = safe_execute_query(
+                "SELECT COUNT(*) FROM payments WHERE payment_type = :package_id AND status = 'completed'",
+                {"package_id": package_id}
             )
-            week_users = result.scalar() or 0
-            
-            result = conn.execute(text("SELECT COUNT(*) FROM anon_messages"))
-            total_messages = result.scalar() or 0
-            
-            result = conn.execute(
-                text("SELECT COUNT(*) FROM anon_messages WHERE DATE(timestamp) >= :week_ago"),
-                {"week_ago": week_ago}
-            )
-            week_messages = result.scalar() or 0
-            
-            result = conn.execute(text("SELECT COUNT(*) FROM payments WHERE status = 'completed'"))
-            total_payments = result.scalar() or 0
-            
-            result = conn.execute(text("SELECT COALESCE(SUM(amount), 0) FROM payments WHERE status = 'completed'"))
-            total_revenue = result.scalar() or 0
-            
-            package_stats = {}
-            for package_id in price_service.get_all_packages():
-                result = conn.execute(
-                    text("SELECT COUNT(*) FROM payments WHERE payment_type = :package_id AND status = 'completed'"),
-                    {"package_id": package_id}
-                )
-                count = result.scalar() or 0
-                package_stats[package_id] = count
+            count = result.scalar() or 0
+            package_stats[package_id] = count
 
-        text = (
+        stats_message = (
             "📊 <b>Детальная статистика</b>\n\n"
             "👥 <b>Пользователи:</b>\n"
             f"• Всего: <b>{total_users}</b>\n"
@@ -1185,9 +1167,9 @@ async def admin_stats_callback(callback: types.CallbackQuery):
         
         for package_id, count in package_stats.items():
             package = price_service.get_package_info(package_id)
-            text += f"• {package['name']}: <b>{count}</b>\n"
+            stats_message += f"• {package['name']}: <b>{count}</b>\n"
         
-        await callback.message.edit_text(text, parse_mode="HTML", reply_markup=admin_stats_menu())
+        await callback.message.edit_text(stats_message, parse_mode="HTML", reply_markup=admin_stats_menu())
         await callback.answer()
         
     except Exception as e:
@@ -1203,15 +1185,12 @@ async def admin_broadcast(message: types.Message):
         return
 
     try:
-        engine = get_engine()
-        with engine.connect() as conn:
-            result = conn.execute(text("SELECT COUNT(*) FROM users"))
-            total_users = result.scalar() or 0
-            
-            result = conn.execute(text("SELECT COUNT(*) FROM users WHERE anon_link_uid IS NOT NULL"))
-            active_users = result.scalar() or 0
+        total_users = get_users_count()
         
-        text = (
+        result = safe_execute_query("SELECT COUNT(*) FROM users WHERE anon_link_uid IS NOT NULL")
+        active_users = result.scalar() or 0
+        
+        broadcast_message = (
             "📢 <b>Система рассылок</b>\n\n"
             f"👥 <b>Статистика аудитории:</b>\n"
             f"• Всего пользователей: <b>{total_users}</b>\n"
@@ -1221,7 +1200,7 @@ async def admin_broadcast(message: types.Message):
             "• Конкретному пользователю\n"
         )
         
-        await message.answer(text, parse_mode="HTML", reply_markup=admin_broadcast_menu())
+        await message.answer(broadcast_message, parse_mode="HTML", reply_markup=admin_broadcast_menu())
         
     except Exception as e:
         logger.error(f"Ошибка в admin_broadcast: {e}")
@@ -1235,15 +1214,12 @@ async def admin_broadcast_callback(callback: types.CallbackQuery):
         return
 
     try:
-        engine = get_engine()
-        with engine.connect() as conn:
-            result = conn.execute(text("SELECT COUNT(*) FROM users"))
-            total_users = result.scalar() or 0
-            
-            result = conn.execute(text("SELECT COUNT(*) FROM users WHERE anon_link_uid IS NOT NULL"))
-            active_users = result.scalar() or 0
+        total_users = get_users_count()
         
-        text = (
+        result = safe_execute_query("SELECT COUNT(*) FROM users WHERE anon_link_uid IS NOT NULL")
+        active_users = result.scalar() or 0
+        
+        broadcast_message = (
             "📢 <b>Система рассылок</b>\n\n"
             f"👥 <b>Статистика аудитории:</b>\n"
             f"• Всего пользователей: <b>{total_users}</b>\n"
@@ -1253,7 +1229,7 @@ async def admin_broadcast_callback(callback: types.CallbackQuery):
             "• Конкретному пользователю\n"
         )
         
-        await callback.message.edit_text(text, parse_mode="HTML", reply_markup=admin_broadcast_menu())
+        await callback.message.edit_text(broadcast_message, parse_mode="HTML", reply_markup=admin_broadcast_menu())
         await callback.answer()
         
     except Exception as e:
@@ -1347,7 +1323,7 @@ async def admin_settings(message: types.Message):
         await message.answer("❌ Доступ запрещен")
         return
 
-    text = (
+    settings_message = (
         "⚙️ <b>Настройки системы</b>\n\n"
         "🔧 <b>Основные настройки:</b>\n"
         "• Резервное копирование\n"
@@ -1365,7 +1341,7 @@ async def admin_settings(message: types.Message):
         "<code>/cleanup_old_data</code> - очистка"
     )
     
-    await message.answer(text, parse_mode="HTML", reply_markup=admin_settings_menu())
+    await message.answer(settings_message, parse_mode="HTML", reply_markup=admin_settings_menu())
 
 # ==================== ОБНОВЛЕНИЕ ====================
 
@@ -1474,18 +1450,14 @@ async def backup_now_command(message: types.Message):
 async def payment_status_command(message: types.Message):
     """Статус платежной системы"""
     try:
-        engine = get_engine()
-        with engine.connect() as conn:
-            result = conn.execute(text("SELECT COUNT(*) FROM payments WHERE status = 'completed'"))
-            total_payments = result.scalar() or 0
-            
-            result = conn.execute(text("SELECT COUNT(*) FROM payments WHERE status = 'pending'"))
-            pending_payments = result.scalar() or 0
-            
-            result = conn.execute(text("SELECT COALESCE(SUM(amount), 0) FROM payments WHERE status = 'completed'"))
-            total_revenue = result.scalar() or 0
+        total_payments = get_payments_count()
         
-        text = (
+        result = safe_execute_query("SELECT COUNT(*) FROM payments WHERE status = 'pending'")
+        pending_payments = result.scalar() or 0
+        
+        total_revenue = get_revenue()
+        
+        status_message = (
             "🔄 <b>Статус платежной системы</b>\n\n"
             "❌ <b>Автоматические платежи отключены</b>\n\n"
             f"📊 <b>Статистика:</b>\n"
@@ -1497,7 +1469,7 @@ async def payment_status_command(message: types.Message):
             "<code>/set_reveals ID_пользователя количество</code>"
         )
         
-        await message.answer(text, parse_mode="HTML")
+        await message.answer(status_message, parse_mode="HTML")
         
     except Exception as e:
         logger.error(f"Ошибка в payment_status_command: {e}")
@@ -1517,56 +1489,54 @@ async def user_info_command(message: types.Message):
 
         telegram_id = int(args[1])
         
-        engine = get_engine()
-        with engine.connect() as conn:
-            result = conn.execute(
-                text("SELECT * FROM users WHERE telegram_id = :telegram_id"),
-                {"telegram_id": telegram_id}
-            )
-            user = result.fetchone()
-            
-            if not user:
-                await message.answer("❌ Пользователь не найден")
-                return
+        result = safe_execute_query(
+            "SELECT * FROM users WHERE telegram_id = :telegram_id",
+            {"telegram_id": telegram_id}
+        )
+        user = result.fetchone()
+        
+        if not user:
+            await message.answer("❌ Пользователь не найден")
+            return
 
-            user_id = user[0]
-            telegram_id = user[1]
-            first_name = user[3]
-            username = user[2] or "не указан"
-            available_reveals = user[10] or 0
-            anon_link_uid = user[5] or "нет"
-            created_at = user[6]
-            
-            result = conn.execute(
-                text("SELECT COUNT(*) FROM anon_messages WHERE sender_id = :user_id"),
-                {"user_id": user_id}
-            )
-            sent_messages = result.scalar() or 0
-            
-            result = conn.execute(
-                text("SELECT COUNT(*) FROM anon_messages WHERE receiver_id = :user_id"),
-                {"user_id": user_id}
-            )
-            received_messages = result.scalar() or 0
-            
-            result = conn.execute(
-                text("SELECT COUNT(*) FROM payments WHERE user_id = :user_id AND status = 'completed'"),
-                {"user_id": user_id}
-            )
-            total_payments = result.scalar() or 0
-            
-            result = conn.execute(
-                text("SELECT COALESCE(SUM(amount), 0) FROM payments WHERE user_id = :user_id AND status = 'completed'"),
-                {"user_id": user_id}
-            )
-            total_spent = result.scalar() or 0
+        user_id = user[0]
+        telegram_id = user[1]
+        first_name = user[3]
+        username = user[2] or "не указан"
+        available_reveals = user[10] or 0
+        anon_link_uid = user[5] or "нет"
+        created_at = user[6]
+        
+        result = safe_execute_query(
+            "SELECT COUNT(*) FROM anon_messages WHERE sender_id = :user_id",
+            {"user_id": user_id}
+        )
+        sent_messages = result.scalar() or 0
+        
+        result = safe_execute_query(
+            "SELECT COUNT(*) FROM anon_messages WHERE receiver_id = :user_id",
+            {"user_id": user_id}
+        )
+        received_messages = result.scalar() or 0
+        
+        result = safe_execute_query(
+            "SELECT COUNT(*) FROM payments WHERE user_id = :user_id AND status = 'completed'",
+            {"user_id": user_id}
+        )
+        total_payments = result.scalar() or 0
+        
+        result = safe_execute_query(
+            "SELECT COALESCE(SUM(amount), 0) FROM payments WHERE user_id = :user_id AND status = 'completed'",
+            {"user_id": user_id}
+        )
+        total_spent = result.scalar() or 0
         
         if isinstance(created_at, str):
             created_date = created_at[:19].replace('T', ' ')
         else:
             created_date = created_at.strftime('%d.%m.%Y %H:%M')
         
-        text = (
+        user_info = (
             f"👤 <b>Информация о пользователе</b>\n\n"
             f"🆔 <b>Telegram ID:</b> <code>{telegram_id}</code>\n"
             f"👤 <b>Имя:</b> {first_name}\n"
@@ -1582,7 +1552,7 @@ async def user_info_command(message: types.Message):
             f"• 💰 Потрачено: <b>{total_spent / 100:.2f}₽</b>\n"
         )
         
-        await message.answer(text, parse_mode="HTML")
+        await message.answer(user_info, parse_mode="HTML")
 
     except (IndexError, ValueError):
         await message.answer("❌ Использование: /user_info ID_пользователя")
@@ -1604,7 +1574,6 @@ async def set_reveals_command(message: types.Message):
         telegram_id = int(args[1])
         new_count = int(args[2])
         
-        from sqlalchemy.orm import Session
         from app.database import get_session_local
         
         SessionLocal = get_session_local()
@@ -1641,7 +1610,7 @@ async def db_status_command(message: types.Message):
         size_mb = backup_service.get_db_size()
         stats = backup_service.get_db_stats()
         
-        status_text = (
+        status_message = (
             "📊 <b>Статус базы данных</b>\n\n"
             f"💾 Размер: <b>{size_mb:.2f} MB</b>\n"
             f"👥 Пользователей: <b>{stats.get('users', 'N/A')}</b>\n"
@@ -1651,13 +1620,13 @@ async def db_status_command(message: types.Message):
         )
         
         if size_mb > backup_service.critical_size_mb:
-            status_text += "🚨 <b>КРИТИЧЕСКИЙ РАЗМЕР!</b>"
+            status_message += "🚨 <b>КРИТИЧЕСКИЙ РАЗМЕР!</b>"
         elif size_mb > backup_service.max_size_mb:
-            status_text += "⚠️ <b>Большой размер</b>"
+            status_message += "⚠️ <b>Большой размер</b>"
         else:
-            status_text += "✅ <b>Размер в норме</b>"
+            status_message += "✅ <b>Размер в норме</b>"
         
-        await message.answer(status_text, parse_mode="HTML")
+        await message.answer(status_message, parse_mode="HTML")
         
     except Exception as e:
         await message.answer(f"❌ Ошибка получения статуса БД: {e}")
@@ -1712,21 +1681,12 @@ async def upload_db_command(message: types.Message):
 async def stats_command(message: types.Message):
     """Быстрая статистика"""
     try:
-        engine = get_engine()
-        with engine.connect() as conn:
-            result = conn.execute(text("SELECT COUNT(*) FROM users"))
-            total_users = result.scalar() or 0
-            
-            result = conn.execute(text("SELECT COUNT(*) FROM anon_messages"))
-            total_messages = result.scalar() or 0
-            
-            result = conn.execute(text("SELECT COUNT(*) FROM payments WHERE status = 'completed'"))
-            total_payments = result.scalar() or 0
-            
-            result = conn.execute(text("SELECT COALESCE(SUM(amount), 0) FROM payments WHERE status = 'completed'"))
-            total_revenue = result.scalar() or 0
+        total_users = get_users_count()
+        total_messages = get_messages_count()
+        total_payments = get_payments_count()
+        total_revenue = get_revenue()
         
-        text = (
+        stats_message = (
             "📊 <b>Быстрая статистика</b>\n\n"
             f"👥 Пользователей: <b>{total_users}</b>\n"
             f"📨 Сообщений: <b>{total_messages}</b>\n"
@@ -1734,7 +1694,7 @@ async def stats_command(message: types.Message):
             f"🏦 Выручка: <b>{total_revenue / 100:.2f}₽</b>"
         )
         
-        await message.answer(text, parse_mode="HTML")
+        await message.answer(stats_message, parse_mode="HTML")
         
     except Exception as e:
         await message.answer(f"❌ Ошибка получения статистики: {e}")
