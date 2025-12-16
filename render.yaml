@@ -2,16 +2,60 @@ services:
   - type: web
     name: anon-tg-bot
     env: python
+    region: frankfurt  # Или другой регион ближе к вам
+    plan: free  # Или starter/pro для продакшена
+    
+    # Команды сборки и запуска
     buildCommand: |
+      pip install --upgrade pip
       pip install -r requirements.txt
       python create_tables.py
-    startCommand: bash startup.sh
+      
+    startCommand: |
+      # Запускаем бота и веб-сервер
+      bash startup.sh
+    
+    # Переменные окружения
     envVars:
-      - key: DATABASE_URL
-        value: sqlite:////opt/render/project/src/data/bot.db
+      - key: PYTHON_VERSION
+        value: 3.11.0
+        
       - key: PYTHONPATH
         value: /opt/render/project/src
+        
+      - key: RENDER
+        value: true
+        
+      - key: DATABASE_URL
+        value: sqlite:////opt/render/project/src/data/bot.db
+      
+      # Эти переменные нужно установить в Dashboard Render
+      - key: BOT_TOKEN
+        sync: false  # Установить вручную в Dashboard
+        
+      - key: ADMIN_IDS
+        sync: false  # Установить вручную в Dashboard
+        
+      - key: YOOMONEY_WALLET
+        sync: false  # Установить вручную в Dashboard (опционально)
+        
+      - key: YOOMONEY_TOKEN
+        sync: false  # Установить вручную в Dashboard (опционально)
+    
+    # Диск для хранения данных (SQLite файлы, бэкапы, логи)
     disk:
       name: bot-data
       mountPath: /opt/render/project/src/data
-      sizeGB: 1
+      sizeGB: 1  # Минимальный размер для free плана
+      
+    # Авто-деплой из GitHub
+    autoDeploy: true
+    repo: https://github.com/Volchonoc-cod/anon-tg-bot
+    branch: main
+    
+    # Health check
+    healthCheckPath: /ping
+    initialDelaySec: 10
+    
+    # Масштабирование
+    numInstances: 1
