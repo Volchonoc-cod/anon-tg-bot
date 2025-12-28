@@ -9,6 +9,7 @@ from datetime import datetime
 import signal
 import time
 
+
 # Настройка пути
 current_dir = os.path.dirname(os.path.abspath(__file__))
 sys.path.insert(0, current_dir)
@@ -175,7 +176,10 @@ async def initialize_bot():
         from app.handlers.payment_handlers import router as payment_router
         from app.handlers.anon_handlers import router as anon_router
         from app.handlers.debug_handlers import router as debug_router
+        from app.handlers.conversations_admin import router as conversations_router
+
         
+        router.include_router(conversations_router)        
         dp.include_router(main_router)
         dp.include_router(admin_router)
         dp.include_router(payment_router)
