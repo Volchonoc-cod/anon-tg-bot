@@ -27,6 +27,10 @@ class ConversationStates(StatesGroup):
 def is_admin(user_id: int):
     return user_id in ADMIN_IDS
 
+def admin_filter(message: types.Message) -> bool:
+    """Фильтр для админских команд"""
+    return message.from_user.id in ADMIN_IDS
+
 # ==================== МЕНЮ ПЕРЕПИСОК ====================
 
 @router.message(F.text == "💬 Переписки")
@@ -857,12 +861,6 @@ async def find_conversation_by_id_command(message: types.Message):
         await message.answer("❌ Неверный формат ID")
     except Exception as e:
         await message.answer(f"❌ Ошибка: {e}")
-
-# ==================== ВСПОМОГАТЕЛЬНЫЕ ФУНКЦИИ ====================
-
-def admin_filter(message: types.Message) -> bool:
-    """Фильтр для админских команд"""
-    return message.from_user.id in ADMIN_IDS
 
 # Экспортируем router для подключения в основном файле
 __all__ = ['router']
