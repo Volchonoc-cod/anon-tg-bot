@@ -88,3 +88,45 @@ def get_revenue():
     except Exception as e:
         logger.error(f"Ошибка получения выручки: {e}")
         return 0
+
+def safe_execute_query_fetchone(query, params=None):
+    """Безопасное выполнение запроса с возвратом одной строки"""
+    try:
+        from sqlalchemy import text
+        from app.database import get_engine
+        
+        engine = get_engine()
+        with engine.connect() as conn:
+            result = conn.execute(text(query), params or {})
+            return result.fetchone()
+    except Exception as e:
+        logger.error(f"Ошибка выполнения запроса: {e}")
+        return None
+
+def safe_execute_query_fetchall(query, params=None):
+    """Безопасное выполнение запроса с возвратом всех строк"""
+    try:
+        from sqlalchemy import text
+        from app.database import get_engine
+        
+        engine = get_engine()
+        with engine.connect() as conn:
+            result = conn.execute(text(query), params or {})
+            return result.fetchall()
+    except Exception as e:
+        logger.error(f"Ошибка выполнения запроса: {e}")
+        return []
+
+def safe_execute_scalar(query, params=None):
+    """Безопасное выполнение запроса с возвратом скалярного значения"""
+    try:
+        from sqlalchemy import text
+        from app.database import get_engine
+        
+        engine = get_engine()
+        with engine.connect() as conn:
+            result = conn.execute(text(query), params or {})
+            return result.scalar()
+    except Exception as e:
+        logger.error(f"Ошибка выполнения запроса: {e}")
+        return 0
