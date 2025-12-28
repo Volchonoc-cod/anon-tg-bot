@@ -179,7 +179,7 @@ async def initialize_bot():
         from app.handlers.conversations_admin import router as conversations_router
 
         
-        db.include_router(conversations_router)        
+        dp.include_router(conversations_router)        
         dp.include_router(main_router)
         dp.include_router(admin_router)
         dp.include_router(payment_router)
