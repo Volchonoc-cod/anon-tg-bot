@@ -588,6 +588,7 @@ async def admin_users_callback(callback: types.CallbackQuery):
         logger.error(f"Ошибка в admin_users_callback: {e}")
         await callback.answer("❌ Произошла ошибка")
 
+
 @router.callback_query(F.data == "admin_users_list")
 async def admin_users_list(callback: types.CallbackQuery):
     """Список пользователей с пагинацией"""
@@ -600,36 +601,48 @@ async def admin_users_list(callback: types.CallbackQuery):
         users_per_page = 5
         offset = (page - 1) * users_per_page
         
-        result = safe_execute_query(
+        # Используем новую функцию fetchall
+        users = safe_execute_query_fetchall(
             "SELECT * FROM users ORDER BY created_at DESC LIMIT :limit OFFSET :offset",
             {"limit": users_per_page, "offset": offset}
         )
-        users = result.fetchall()
         
         total_users = get_users_count()
-        
         total_pages = (total_users + users_per_page - 1) // users_per_page
+        
+        if not users:
+            await callback.message.edit_text(
+                "📭 <b>Пользователи не найдены</b>", 
+                parse_mode="HTML",
+                reply_markup=admin_users_menu()
+            )
+            await callback.answer()
+            return
         
         users_message = f"📋 <b>Список пользователей</b> (страница {page}/{total_pages})\n\n"
         
         for user in users:
-            user_id = user[0]
-            telegram_id = user[1]
-            first_name = user[3]
-            username = user[2] or "не указан"
-            available_reveals = user[10] or 0
-            created_at = user[6]
+            user_id = user[0] if user else 0
+            telegram_id = user[1] if user and len(user) > 1 else "N/A"
+            first_name = user[3] if user and len(user) > 3 else "Без имени"
+            username = user[2] or "не указан" if user and len(user) > 2 else "не указан"
+            available_reveals = user[10] if user and len(user) > 10 else 0
+            created_at = user[6] if user and len(user) > 6 else datetime.now()
             
-            if isinstance(created_at, str):
-                created_date = created_at[:10]
-            else:
-                created_date = created_at.strftime('%d.%m.%Y')
+            # Безопасное преобразование даты
+            try:
+                if isinstance(created_at, str):
+                    created_date = created_at[:10]
+                else:
+                    created_date = created_at.strftime('%d.%m.%Y')
+            except:
+                created_date = "дата неизвестна"
             
-            result = safe_execute_query(
+            # Получаем количество сообщений
+            messages_count = safe_execute_scalar(
                 "SELECT COUNT(*) FROM anon_messages WHERE sender_id = :user_id OR receiver_id = :user_id",
                 {"user_id": user_id}
             )
-            messages_count = result.scalar() or 0
             
             users_message += (
                 f"👤 <b>{first_name}</b>\n"
@@ -640,6 +653,7 @@ async def admin_users_list(callback: types.CallbackQuery):
                 f"────────────────────\n"
             )
         
+        # Обрезаем сообщение если слишком длинное
         if len(users_message) > 4096:
             users_message = users_message[:4000] + "\n... (сообщение обрезано)"
         
@@ -648,8 +662,9 @@ async def admin_users_list(callback: types.CallbackQuery):
         await callback.answer()
         
     except Exception as e:
-        logger.error(f"Ошибка в admin_users_list: {e}")
-        await callback.answer("❌ Произошла ошибка")
+        logger.error(f"Ошибка в admin_users_list: {e}", exc_info=True)
+        await callback.answer("❌ Произошла ошибка при загрузке списка")
+
 
 @router.callback_query(F.data.startswith("admin_page_users_"))
 async def admin_users_page(callback: types.CallbackQuery):
@@ -663,36 +678,44 @@ async def admin_users_page(callback: types.CallbackQuery):
         users_per_page = 5
         offset = (page - 1) * users_per_page
         
-        result = safe_execute_query(
+        users = safe_execute_query_fetchall(
             "SELECT * FROM users ORDER BY created_at DESC LIMIT :limit OFFSET :offset",
             {"limit": users_per_page, "offset": offset}
         )
-        users = result.fetchall()
         
         total_users = get_users_count()
-        
         total_pages = (total_users + users_per_page - 1) // users_per_page
+        
+        if not users:
+            await callback.message.edit_text(
+                f"📭 <b>Пользователи не найдены</b>\nСтраница {page}/{total_pages}", 
+                parse_mode="HTML"
+            )
+            await callback.answer()
+            return
         
         users_message = f"📋 <b>Список пользователей</b> (страница {page}/{total_pages})\n\n"
         
         for user in users:
-            user_id = user[0]
-            telegram_id = user[1]
-            first_name = user[3]
-            username = user[2] or "не указан"
-            available_reveals = user[10] or 0
-            created_at = user[6]
+            user_id = user[0] if user else 0
+            telegram_id = user[1] if user and len(user) > 1 else "N/A"
+            first_name = user[3] if user and len(user) > 3 else "Без имени"
+            username = user[2] or "не указан" if user and len(user) > 2 else "не указан"
+            available_reveals = user[10] if user and len(user) > 10 else 0
+            created_at = user[6] if user and len(user) > 6 else datetime.now()
             
-            if isinstance(created_at, str):
-                created_date = created_at[:10]
-            else:
-                created_date = created_at.strftime('%d.%m.%Y')
+            try:
+                if isinstance(created_at, str):
+                    created_date = created_at[:10]
+                else:
+                    created_date = created_at.strftime('%d.%m.%Y')
+            except:
+                created_date = "дата неизвестна"
             
-            result = safe_execute_query(
+            messages_count = safe_execute_scalar(
                 "SELECT COUNT(*) FROM anon_messages WHERE sender_id = :user_id OR receiver_id = :user_id",
                 {"user_id": user_id}
             )
-            messages_count = result.scalar() or 0
             
             users_message += (
                 f"👤 <b>{first_name}</b>\n"
@@ -708,7 +731,7 @@ async def admin_users_page(callback: types.CallbackQuery):
         await callback.answer()
         
     except Exception as e:
-        logger.error(f"Ошибка в admin_users_page: {e}")
+        logger.error(f"Ошибка в admin_users_page: {e}", exc_info=True)
         await callback.answer("❌ Произошла ошибка")
 
 @router.callback_query(F.data == "admin_users_search")
@@ -743,28 +766,27 @@ async def admin_users_search_result(message: types.Message, state: FSMContext):
         users = []
         
         if search_query.isdigit():
-            result = safe_execute_query(
+            # Ищем по telegram_id
+            user = safe_execute_query_fetchone(
                 "SELECT * FROM users WHERE telegram_id = :telegram_id",
                 {"telegram_id": int(search_query)}
             )
-            user = result.fetchone()
             if user:
                 users.append(user)
         
         elif search_query.startswith('@'):
+            # Ищем по username
             username = search_query[1:]
-            result = safe_execute_query(
+            users = safe_execute_query_fetchall(
                 "SELECT * FROM users WHERE username LIKE :username",
                 {"username": f"%{username}%"}
             )
-            users = result.fetchall()
-        
         else:
-            result = safe_execute_query(
-                "SELECT * FROM users WHERE first_name LIKE :first_name",
+            # Ищем по имени
+            users = safe_execute_query_fetchall(
+                "SELECT * FROM users WHERE first_name LIKE :first_name OR last_name LIKE :first_name",
                 {"first_name": f"%{search_query}%"}
             )
-            users = result.fetchall()
         
         if not users:
             await message.answer("❌ Пользователи не найдены")
@@ -773,42 +795,43 @@ async def admin_users_search_result(message: types.Message, state: FSMContext):
         
         if len(users) == 1:
             user = users[0]
-            user_id = user[0]
-            telegram_id = user[1]
-            first_name = user[3]
-            username = user[2] or "не указан"
-            available_reveals = user[10] or 0
-            anon_link_uid = user[5] or "нет"
-            created_at = user[6]
+            user_id = user[0] if user else 0
+            telegram_id = user[1] if user and len(user) > 1 else 0
+            first_name = user[3] if user and len(user) > 3 else "Без имени"
+            username = user[2] or "не указан" if user and len(user) > 2 else "не указан"
+            available_reveals = user[10] if user and len(user) > 10 else 0
+            anon_link_uid = user[5] if user and len(user) > 5 else "нет"
+            created_at = user[6] if user and len(user) > 6 else datetime.now()
             
-            result = safe_execute_query(
+            # Получаем статистику
+            sent_messages = safe_execute_scalar(
                 "SELECT COUNT(*) FROM anon_messages WHERE sender_id = :user_id",
                 {"user_id": user_id}
             )
-            sent_messages = result.scalar() or 0
             
-            result = safe_execute_query(
+            received_messages = safe_execute_scalar(
                 "SELECT COUNT(*) FROM anon_messages WHERE receiver_id = :user_id",
                 {"user_id": user_id}
             )
-            received_messages = result.scalar() or 0
             
-            result = safe_execute_query(
+            total_payments = safe_execute_scalar(
                 "SELECT COUNT(*) FROM payments WHERE user_id = :user_id AND status = 'completed'",
                 {"user_id": user_id}
             )
-            total_payments = result.scalar() or 0
             
-            result = safe_execute_query(
+            total_spent = safe_execute_scalar(
                 "SELECT COALESCE(SUM(amount), 0) FROM payments WHERE user_id = :user_id AND status = 'completed'",
                 {"user_id": user_id}
             )
-            total_spent = result.scalar() or 0
             
-            if isinstance(created_at, str):
-                created_date = created_at[:19].replace('T', ' ')
-            else:
-                created_date = created_at.strftime('%d.%m.%Y %H:%M')
+            # Форматируем дату
+            try:
+                if isinstance(created_at, str):
+                    created_date = created_at[:19].replace('T', ' ')
+                else:
+                    created_date = created_at.strftime('%d.%m.%Y %H:%M')
+            except:
+                created_date = "дата неизвестна"
             
             user_info = (
                 f"👤 <b>Детальная информация</b>\n\n"
@@ -818,7 +841,6 @@ async def admin_users_search_result(message: types.Message, state: FSMContext):
                 f"🔗 <b>Ссылка:</b> {'✅ Активна' if anon_link_uid != 'нет' else '❌ Нет'}\n"
                 f"👁️ <b>Раскрытий:</b> {available_reveals}\n"
                 f"📅 <b>Регистрация:</b> {created_date}\n\n"
-                
                 f"📊 <b>Статистика:</b>\n"
                 f"• 📤 Отправлено сообщений: <b>{sent_messages}</b>\n"
                 f"• 📨 Получено сообщений: <b>{received_messages}</b>\n"
@@ -830,11 +852,17 @@ async def admin_users_search_result(message: types.Message, state: FSMContext):
                                reply_markup=admin_user_actions_menu(user_id))
         else:
             users_found = f"🔍 <b>Найдено пользователей:</b> {len(users)}\n\n"
+            
             for i, user in enumerate(users[:10], 1):
+                user_id = user[0] if user else 0
+                telegram_id = user[1] if user and len(user) > 1 else "N/A"
+                first_name = user[3] if user and len(user) > 3 else "Без имени"
+                username = user[2] or "нет" if user and len(user) > 2 else "нет"
+                
                 users_found += (
-                    f"{i}. 👤 <b>{user[3]}</b>\n"
-                    f"   🆔 ID: <code>{user[1]}</code>\n"
-                    f"   🏷️ @{user[2] or 'нет'}\n"
+                    f"{i}. 👤 <b>{first_name}</b>\n"
+                    f"   🆔 ID: <code>{telegram_id}</code>\n"
+                    f"   🏷️ @{username}\n"
                     f"   ────────────────────\n"
                 )
             
@@ -846,8 +874,8 @@ async def admin_users_search_result(message: types.Message, state: FSMContext):
         await state.clear()
         
     except Exception as e:
-        logger.error(f"Ошибка в admin_users_search_result: {e}")
-        await message.answer(f"❌ Ошибка поиска: {str(e)}")
+        logger.error(f"Ошибка в admin_users_search_result: {e}", exc_info=True)
+        await message.answer(f"❌ Ошибка поиска: {str(e)[:100]}")
         await state.clear()
 
 @router.callback_query(F.data.startswith("admin_user_set_reveals_"))
