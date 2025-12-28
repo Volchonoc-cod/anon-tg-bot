@@ -3,15 +3,17 @@ from aiogram.types import (
     InlineKeyboardMarkup, InlineKeyboardButton
 )
 from app.price_service import price_service
+from aiogram.types import InlineKeyboardMarkup, InlineKeyboardButton
+
 
 # Главное админ-меню
 def admin_main_menu():
     return ReplyKeyboardMarkup(
         keyboard=[
-            [KeyboardButton(text="👥 Пользователи"), KeyboardButton(text="💰 Цены")],
-            [KeyboardButton(text="📊 Статистика"), KeyboardButton(text="📢 Рассылка")],
-            [KeyboardButton(text="⚙️ Настройки"), KeyboardButton(text="🔄 Обновить")],
-            [KeyboardButton(text="🚪 Выйти из админки")]
+            [KeyboardButton(text="👥 Пользователи"), KeyboardButton(text="💬 Переписки")],
+            [KeyboardButton(text="💰 Цены"), KeyboardButton(text="📊 Статистика")],
+            [KeyboardButton(text="📢 Рассылка"), KeyboardButton(text="⚙️ Настройки")],
+            [KeyboardButton(text="🔄 Обновить"), KeyboardButton(text="🚪 Выйти из админки")]
         ],
         resize_keyboard=True
     )
@@ -172,3 +174,92 @@ def admin_settings_menu():
             ]
         ]
     )
+
+
+def admin_conversations_menu():
+    """Меню управления переписками"""
+    return InlineKeyboardMarkup(
+        inline_keyboard=[
+            [
+                InlineKeyboardButton(text="📋 Список пользователей с переписками", 
+                                   callback_data="admin_conversations_list"),
+            ],
+            [
+                InlineKeyboardButton(text="🔍 Найти пользователя", 
+                                   callback_data="admin_conversations_search"),
+                InlineKeyboardButton(text="🔎 Поиск по сообщениям", 
+                                   callback_data="admin_search_messages")
+            ],
+            [
+                InlineKeyboardButton(text="◀️ В админ-панель", callback_data="admin_main"),
+                InlineKeyboardButton(text="🚪 Выйти из админки", callback_data="exit_admin")
+            ]
+        ]
+    )
+
+def admin_user_conversations_menu(user_id: int, conversations_count: int = 0):
+    """Меню переписок конкретного пользователя"""
+    buttons = [
+        [
+            InlineKeyboardButton(text="📋 Все переписки", 
+                               callback_data=f"admin_view_conversations_{user_id}"),
+        ],
+        [
+            InlineKeyboardButton(text="📊 Статистика сообщений", 
+                               callback_data=f"admin_user_stats_{user_id}"),
+        ]
+    ]
+    
+    if conversations_count > 0:
+        buttons.insert(1, [
+            InlineKeyboardButton(text="💬 Последние диалоги", 
+                               callback_data=f"admin_recent_conversations_{user_id}")
+        ])
+    
+    buttons.append([
+        InlineKeyboardButton(text="◀️ Назад к перепискам", callback_data="admin_conversations"),
+        InlineKeyboardButton(text="🚪 Выйти из админки", callback_data="exit_admin")
+    ])
+    
+    return InlineKeyboardMarkup(inline_keyboard=buttons)
+
+def admin_message_history_keyboard(user1_id: int, user2_id: int, page: int = 1, total_pages: int = 1):
+    """Клавиатура для навигации по истории сообщений"""
+    buttons = []
+    
+    # Кнопки навигации если есть несколько страниц
+    if total_pages > 1:
+        nav_buttons = []
+        if page > 1:
+            nav_buttons.append(InlineKeyboardButton(
+                text="◀️ Назад", 
+                callback_data=f"admin_conversation_page_{user1_id}_{user2_id}_{page-1}"
+            ))
+        
+        nav_buttons.append(InlineKeyboardButton(
+            text=f"{page}/{total_pages}", 
+            callback_data="no_action"
+        ))
+        
+        if page < total_pages:
+            nav_buttons.append(InlineKeyboardButton(
+                text="Вперед ▶️", 
+                callback_data=f"admin_conversation_page_{user1_id}_{user2_id}_{page+1}"
+            ))
+        
+        buttons.append(nav_buttons)
+    
+    # Основные кнопки действий
+    buttons.append([
+        InlineKeyboardButton(text="📥 Экспорт переписки", 
+                           callback_data=f"admin_export_conversation_{user1_id}_{user2_id}"),
+    ])
+    
+    buttons.append([
+        InlineKeyboardButton(text="◀️ Назад к пользователю", 
+                           callback_data=f"admin_view_conversations_{user1_id}"),
+        InlineKeyboardButton(text="🏠 В админ-панель", callback_data="admin_main")
+    ])
+    
+    return InlineKeyboardMarkup(inline_keyboard=buttons)
+
