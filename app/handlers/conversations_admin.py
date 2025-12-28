@@ -11,9 +11,18 @@ from typing import List, Dict, Tuple, Optional
 from sqlalchemy import text
 
 from app.database import get_engine
-from app.database_utils import safe_execute_query_fetchall, safe_execute_query_fetchone, safe_execute_scalar
+from app.database_utils import (
+    safe_execute_query_fetchall, 
+    safe_execute_query_fetchone, 
+    safe_execute_scalar
+)
 from app.config import ADMIN_IDS
-from app.keyboards_admin import admin_conversations_menu, admin_user_conversations_menu, admin_message_history_keyboard
+from app.keyboards_admin import (
+    admin_conversations_menu, 
+    admin_user_conversations_menu, 
+    admin_message_history_keyboard,
+    admin_main_menu
+)
 from app.keyboards import main_menu
 
 logger = logging.getLogger(__name__)
@@ -42,20 +51,14 @@ async def admin_conversations(message: types.Message):
 
     try:
         # Получаем статистику по перепискам
-        total_users_with_conversations = safe_execute_scalar(
-            "SELECT COUNT(DISTINCT sender_id) + COUNT(DISTINCT receiver_id) FROM anon_messages WHERE sender_id IS NOT NULL"
-        ) or 0
-        
-        total_conversations = safe_execute_scalar(
-            """
+        total_conversations = safe_execute_scalar("""
             SELECT COUNT(DISTINCT CASE 
                 WHEN sender_id < receiver_id THEN sender_id || '-' || receiver_id 
                 ELSE receiver_id || '-' || sender_id 
             END)
             FROM anon_messages 
             WHERE sender_id IS NOT NULL AND receiver_id IS NOT NULL
-            """
-        ) or 0
+        """) or 0
         
         today_messages = safe_execute_scalar(
             "SELECT COUNT(*) FROM anon_messages WHERE DATE(timestamp) = DATE('now')"
@@ -65,10 +68,19 @@ async def admin_conversations(message: types.Message):
             "SELECT COUNT(*) FROM anon_messages WHERE timestamp >= datetime('now', '-7 days')"
         ) or 0
         
+        # Получаем количество пользователей с сообщениями
+        users_with_messages = safe_execute_scalar("""
+            SELECT COUNT(DISTINCT CASE 
+                WHEN sender_id IS NOT NULL THEN sender_id 
+                ELSE receiver_id 
+            END)
+            FROM anon_messages
+        """) or 0
+        
         conversations_message = (
             "💬 <b>Управление переписками</b>\n\n"
             "📊 <b>Статистика переписок:</b>\n"
-            f"• 👥 Пользователей с переписками: <b>{total_users_with_conversations}</b>\n"
+            f"• 👥 Пользователей с переписками: <b>{users_with_messages}</b>\n"
             f"• 💬 Активных диалогов: <b>{total_conversations}</b>\n"
             f"• 📨 Сообщений сегодня: <b>{today_messages}</b>\n"
             f"• 📨 Сообщений за неделю: <b>{week_messages}</b>\n\n"
@@ -93,25 +105,27 @@ async def admin_conversations_callback(callback: types.CallbackQuery):
         return
 
     try:
-        total_users_with_conversations = safe_execute_scalar(
-            "SELECT COUNT(DISTINCT sender_id) + COUNT(DISTINCT receiver_id) FROM anon_messages WHERE sender_id IS NOT NULL"
-        ) or 0
-        
-        total_conversations = safe_execute_scalar(
-            """
+        total_conversations = safe_execute_scalar("""
             SELECT COUNT(DISTINCT CASE 
                 WHEN sender_id < receiver_id THEN sender_id || '-' || receiver_id 
                 ELSE receiver_id || '-' || sender_id 
             END)
             FROM anon_messages 
             WHERE sender_id IS NOT NULL AND receiver_id IS NOT NULL
-            """
-        ) or 0
+        """) or 0
+        
+        users_with_messages = safe_execute_scalar("""
+            SELECT COUNT(DISTINCT CASE 
+                WHEN sender_id IS NOT NULL THEN sender_id 
+                ELSE receiver_id 
+            END)
+            FROM anon_messages
+        """) or 0
         
         conversations_message = (
             "💬 <b>Управление переписками</b>\n\n"
             "📊 <b>Статистика переписок:</b>\n"
-            f"• 👥 Пользователей с переписками: <b>{total_users_with_conversations}</b>\n"
+            f"• 👥 Пользователей с переписками: <b>{users_with_messages}</b>\n"
             f"• 💬 Активных диалогов: <b>{total_conversations}</b>\n\n"
             "🔍 <b>Доступные действия:</b>\n"
             "Выберите опцию ниже"
@@ -137,24 +151,29 @@ async def admin_conversations_list(callback: types.CallbackQuery):
     try:
         # Получаем пользователей с переписками
         users = safe_execute_query_fetchall("""
-            SELECT u.id, u.telegram_id, u.first_name, u.username,
-                   COUNT(DISTINCT CASE WHEN am.sender_id = u.id THEN am.receiver_id ELSE NULL END) as sent_to_count,
-                   COUNT(DISTINCT CASE WHEN am.receiver_id = u.id THEN am.sender_id ELSE NULL END) as received_from_count,
-                   COUNT(*) as total_messages,
-                   MAX(am.timestamp) as last_message_time
+            SELECT 
+                u.id, 
+                u.telegram_id, 
+                u.first_name, 
+                u.username,
+                COUNT(DISTINCT am.receiver_id) as sent_to_count,
+                COUNT(DISTINCT am2.sender_id) as received_from_count,
+                (COUNT(DISTINCT am.receiver_id) + COUNT(DISTINCT am2.sender_id)) as total_contacts,
+                MAX(GREATEST(COALESCE(am.timestamp, '2000-01-01'), COALESCE(am2.timestamp, '2000-01-01'))) as last_message_time
             FROM users u
-            LEFT JOIN anon_messages am ON u.id = am.sender_id OR u.id = am.receiver_id
-            WHERE am.id IS NOT NULL
+            LEFT JOIN anon_messages am ON u.id = am.sender_id
+            LEFT JOIN anon_messages am2 ON u.id = am2.receiver_id
+            WHERE am.id IS NOT NULL OR am2.id IS NOT NULL
             GROUP BY u.id, u.telegram_id, u.first_name, u.username
+            HAVING total_contacts > 0
             ORDER BY last_message_time DESC
-            LIMIT 20
+            LIMIT 15
         """)
         
         if not users:
-            await callback.message.edit_text(
+            await callback.message.answer(
                 "📭 <b>Пользователей с переписками не найдено</b>",
-                parse_mode="HTML",
-                reply_markup=admin_conversations_menu()
+                parse_mode="HTML"
             )
             await callback.answer()
             return
@@ -164,16 +183,16 @@ async def admin_conversations_list(callback: types.CallbackQuery):
         for user in users:
             user_id = user[0]
             telegram_id = user[1]
-            first_name = user[2]
+            first_name = user[2] or "Без имени"
             username = user[3] or "нет"
             sent_to_count = user[4] or 0
             received_from_count = user[5] or 0
-            total_messages = user[6] or 0
+            total_contacts = user[6] or 0
             last_message_time = user[7]
             
             # Форматируем время последнего сообщения
             last_time = "давно"
-            if last_message_time:
+            if last_message_time and str(last_message_time) != '2000-01-01':
                 try:
                     if isinstance(last_message_time, str):
                         last_time = last_message_time[:16].replace('T', ' ')
@@ -185,11 +204,10 @@ async def admin_conversations_list(callback: types.CallbackQuery):
             conversations_message += (
                 f"👤 <b>{first_name}</b>\n"
                 f"🆔 ID: <code>{telegram_id}</code>\n"
-                f"📊 Переписки: с {sent_to_count} пользователями\n"
-                f"📨 Всего сообщений: {total_messages}\n"
+                f"📊 Контакты: {total_contacts} (📤{sent_to_count}/📨{received_from_count})\n"
                 f"⏰ Последнее: {last_time}\n"
-                f"🔍 <a href='https://t.me/{username}'>Профиль</a> | "
-                f"💬 <a href='tg://btn/{callback.message.chat.id}?start=admin_conversation_{user_id}'>Смотреть переписки</a>\n"
+                f"🔍 @{username} | "
+                f"💬 <a href='tg://btn/{callback.message.chat.id}?start=conversation_{user_id}'>Диалоги</a>\n"
                 f"────────────────────\n"
             )
         
@@ -202,13 +220,18 @@ async def admin_conversations_list(callback: types.CallbackQuery):
             ]
         ])
         
-        await callback.message.edit_text(conversations_message, parse_mode="HTML", disable_web_page_preview=True,
-                                       reply_markup=keyboard)
+        await callback.message.edit_text(
+            conversations_message, 
+            parse_mode="HTML", 
+            disable_web_page_preview=True,
+            reply_markup=keyboard
+        )
         await callback.answer()
         
     except Exception as e:
         logger.error(f"Ошибка в admin_conversations_list: {e}", exc_info=True)
-        await callback.answer("❌ Произошла ошибка при загрузке списка")
+        await callback.message.answer("❌ Произошла ошибка при загрузке списка")
+        await callback.answer()
 
 # ==================== ПОИСК ПОЛЬЗОВАТЕЛЯ ДЛЯ ПРОСМОТРА ПЕРЕПИСОК ====================
 
@@ -301,7 +324,7 @@ async def admin_conversations_search_result(message: types.Message, state: FSMCo
                     f"{i}. 👤 <b>{first_name}</b>\n"
                     f"   🆔 ID: <code>{telegram_id}</code>\n"
                     f"   💬 Переписок: {conversations_count}\n"
-                    f"   📝 <a href='tg://btn/{message.chat.id}?start=admin_conversation_{user_id}'>Смотреть переписки</a>\n"
+                    f"   📝 /find_conversation_{user_id}\n"
                     f"   ────────────────────\n"
                 )
             
@@ -333,7 +356,7 @@ async def show_user_conversations(message: types.Message, user_id: int):
             return
         
         telegram_id = user[0]
-        first_name = user[1]
+        first_name = user[1] or "Без имени"
         username = user[2] or "не указан"
         
         # Получаем всех собеседников пользователя
@@ -351,10 +374,11 @@ async def show_user_conversations(message: types.Message, user_id: int):
                 SELECT DISTINCT 
                     CASE WHEN sender_id = :user_id THEN receiver_id ELSE sender_id END as other_id
                 FROM anon_messages 
-                WHERE sender_id = :user_id OR receiver_id = :user_id
+                WHERE (sender_id = :user_id OR receiver_id = :user_id) 
+                  AND sender_id IS NOT NULL
             ) as conv_ids
             JOIN users other_user ON conv_ids.other_id = other_user.id
-            JOIN anon_messages am ON (
+            LEFT JOIN anon_messages am ON (
                 (am.sender_id = :user_id AND am.receiver_id = other_user.id) OR 
                 (am.receiver_id = :user_id AND am.sender_id = other_user.id)
             )
@@ -376,17 +400,18 @@ async def show_user_conversations(message: types.Message, user_id: int):
             f"👤 <b>Пользователь: {first_name}</b>\n"
             f"🆔 ID: <code>{telegram_id}</code>\n"
             f"🏷️ Username: @{username}\n\n"
-            f"💬 <b>Все переписки:</b>\n"
+            f"💬 <b>Все переписки:</b> ({len(conversations)} диалогов)\n"
         )
         
         # Группируем переписки
-        sent_conversations = []  # Куда пользователь писал
-        received_conversations = []  # Кто писал пользователю
+        mutual_conversations = []  # Взаимные переписки
+        sent_only_conversations = []  # Только отправлял
+        received_only_conversations = []  # Только получал
         
         for conv in conversations:
             other_user_id = conv[0]
             other_telegram_id = conv[1]
-            other_first_name = conv[2]
+            other_first_name = conv[2] or "Без имени"
             other_username = conv[3] or "нет"
             message_count = conv[4] or 0
             sent_count = conv[6] or 0
@@ -394,77 +419,86 @@ async def show_user_conversations(message: types.Message, user_id: int):
             
             if sent_count > 0 and received_count > 0:
                 # Взаимная переписка
-                conversation_type = "💬 Взаимная"
+                mutual_conversations.append(conv)
             elif sent_count > 0:
                 # Пользователь писал
-                conversation_type = "📤 Отправлял"
-                sent_conversations.append(conv)
-                continue
+                sent_only_conversations.append(conv)
             else:
                 # Пользователю писали
-                conversation_type = "📨 Получал"
-                received_conversations.append(conv)
-                continue
-            
-            # Форматируем время последнего сообщения
-            last_message_time = conv[5]
-            last_time = "давно"
-            if last_message_time:
-                try:
-                    if isinstance(last_message_time, str):
-                        last_time = last_message_time[:16].replace('T', ' ')
-                    else:
-                        last_time = last_message_time.strftime('%d.%m.%Y %H:%M')
-                except:
-                    pass
-            
-            user_info += (
-                f"\n{conversation_type} с: <b>{other_first_name}</b>\n"
-                f"🆔 ID: <code>{other_telegram_id}</code>\n"
-                f"📨 Сообщений: {message_count} ({sent_count} отправлено, {received_count} получено)\n"
-                f"⏰ Последнее: {last_time}\n"
-                f"📝 <a href='tg://btn/{message.chat.id}?start=view_conversation_{user_id}_{other_user_id}'>Смотреть переписку</a>\n"
-                f"────────────────────"
-            )
+                received_only_conversations.append(conv)
         
-        # Добавляем разделы для отправленных и полученных сообщений
-        if sent_conversations:
-            user_info += f"\n\n📤 <b>Писал следующим пользователям:</b>"
-            for conv in sent_conversations[:5]:  # Ограничиваем 5
+        # Показываем взаимные переписки
+        if mutual_conversations:
+            user_info += f"\n🤝 <b>Взаимные переписки:</b>\n"
+            for conv in mutual_conversations[:5]:  # Ограничиваем 5
                 other_user_id = conv[0]
                 other_telegram_id = conv[1]
-                other_first_name = conv[2]
+                other_first_name = conv[2] or "Без имени"
                 message_count = conv[4] or 0
                 sent_count = conv[6] or 0
-                
-                user_info += (
-                    f"\n👤 <b>{other_first_name}</b> (ID: <code>{other_telegram_id}</code>)\n"
-                    f"📤 Отправлено: {sent_count} сообщений\n"
-                    f"📝 <a href='tg://btn/{message.chat.id}?start=view_conversation_{user_id}_{other_user_id}'>Смотреть</a>\n"
-                    f"────────────────────"
-                )
-        
-        if received_conversations:
-            user_info += f"\n\n📨 <b>Писали следующие пользователи:</b>"
-            for conv in received_conversations[:5]:  # Ограничиваем 5
-                other_user_id = conv[0]
-                other_telegram_id = conv[1]
-                other_first_name = conv[2]
-                message_count = conv[4] or 0
                 received_count = conv[7] or 0
                 
                 user_info += (
-                    f"\n👤 <b>{other_first_name}</b> (ID: <code>{other_telegram_id}</code>)\n"
-                    f"📨 Получено: {received_count} сообщений\n"
-                    f"📝 <a href='tg://btn/{message.chat.id}?start=view_conversation_{user_id}_{other_user_id}'>Смотреть</a>\n"
-                    f"────────────────────"
+                    f"👤 <b>{other_first_name}</b>\n"
+                    f"   🆔 ID: <code>{other_telegram_id}</code>\n"
+                    f"   📨 Сообщений: {message_count} (📤{sent_count}/📨{received_count})\n"
+                    f"   💬 <a href='tg://btn/{message.chat.id}?start=conversation_{user_id}_{other_user_id}'>Смотреть диалог</a>\n"
+                    f"   ──────────────────\n"
                 )
+        
+        # Показываем отправленные сообщения
+        if sent_only_conversations:
+            user_info += f"\n📤 <b>Писал следующим пользователям:</b>\n"
+            for conv in sent_only_conversations[:3]:  # Ограничиваем 3
+                other_user_id = conv[0]
+                other_telegram_id = conv[1]
+                other_first_name = conv[2] or "Без имени"
+                sent_count = conv[6] or 0
+                
+                user_info += (
+                    f"👤 <b>{other_first_name}</b>\n"
+                    f"   🆔 ID: <code>{other_telegram_id}</code>\n"
+                    f"   📤 Отправлено: {sent_count} сообщений\n"
+                    f"   💬 <a href='tg://btn/{message.chat.id}?start=conversation_{user_id}_{other_user_id}'>Смотреть</a>\n"
+                    f"   ──────────────────\n"
+                )
+        
+        # Показываем полученные сообщения
+        if received_only_conversations:
+            user_info += f"\n📨 <b>Писали следующие пользователи:</b>\n"
+            for conv in received_only_conversations[:3]:  # Ограничиваем 3
+                other_user_id = conv[0]
+                other_telegram_id = conv[1]
+                other_first_name = conv[2] or "Без имени"
+                received_count = conv[7] or 0
+                
+                user_info += (
+                    f"👤 <b>{other_first_name}</b>\n"
+                    f"   🆔 ID: <code>{other_telegram_id}</code>\n"
+                    f"   📨 Получено: {received_count} сообщений\n"
+                    f"   💬 <a href='tg://btn/{message.chat.id}?start=conversation_{user_id}_{other_user_id}'>Смотреть</a>\n"
+                    f"   ──────────────────\n"
+                )
+        
+        if len(mutual_conversations) > 5 or len(sent_only_conversations) > 3 or len(received_only_conversations) > 3:
+            user_info += f"\n⚠️ Показаны не все диалоги. Используйте поиск для полного списка."
         
         # Создаем клавиатуру с действиями
         keyboard = admin_user_conversations_menu(user_id, len(conversations))
         
-        await message.answer(user_info, parse_mode="HTML", disable_web_page_preview=True,
-                           reply_markup=keyboard)
+        if len(user_info) > 4096:
+            # Разбиваем на части
+            parts = [user_info[i:i+4000] for i in range(0, len(user_info), 4000)]
+            for i, part in enumerate(parts):
+                if i == 0:
+                    await message.answer(part, parse_mode="HTML", disable_web_page_preview=True,
+                                      reply_markup=keyboard if i == len(parts)-1 else None)
+                else:
+                    await message.answer(part, parse_mode="HTML", disable_web_page_preview=True,
+                                      reply_markup=keyboard if i == len(parts)-1 else None)
+        else:
+            await message.answer(user_info, parse_mode="HTML", disable_web_page_preview=True,
+                               reply_markup=keyboard)
         
     except Exception as e:
         logger.error(f"Ошибка в show_user_conversations: {e}", exc_info=True)
@@ -505,6 +539,16 @@ async def admin_view_conversation_detail(callback: types.CallbackQuery):
         user1_id = int(data_parts[3])
         user2_id = int(data_parts[4])
         
+        await show_conversation_detail(callback.message, user1_id, user2_id)
+        await callback.answer()
+        
+    except Exception as e:
+        logger.error(f"Ошибка в admin_view_conversation_detail: {e}", exc_info=True)
+        await callback.answer("❌ Произошла ошибка")
+
+async def show_conversation_detail(message: types.Message, user1_id: int, user2_id: int):
+    """Показать детали переписки между двумя пользователями"""
+    try:
         # Получаем информацию о пользователях
         user1 = safe_execute_query_fetchone(
             "SELECT telegram_id, first_name, username FROM users WHERE id = :user_id",
@@ -516,11 +560,11 @@ async def admin_view_conversation_detail(callback: types.CallbackQuery):
         )
         
         if not user1 or not user2:
-            await callback.answer("❌ Пользователи не найдены")
+            await message.answer("❌ Один из пользователей не найден")
             return
         
-        user1_name = user1[1]
-        user2_name = user2[1]
+        user1_name = user1[1] or "Без имени"
+        user2_name = user2[1] or "Без имени"
         user1_username = user1[2] or "нет"
         user2_username = user2[2] or "нет"
         
@@ -532,12 +576,8 @@ async def admin_view_conversation_detail(callback: types.CallbackQuery):
                 am.receiver_id,
                 am.message_text,
                 am.timestamp,
-                am.is_revealed,
-                u1.first_name as sender_name,
-                u2.first_name as receiver_name
+                am.is_revealed
             FROM anon_messages am
-            LEFT JOIN users u1 ON am.sender_id = u1.id
-            LEFT JOIN users u2 ON am.receiver_id = u2.id
             WHERE (am.sender_id = :user1_id AND am.receiver_id = :user2_id)
                OR (am.sender_id = :user2_id AND am.receiver_id = :user1_id)
             ORDER BY am.timestamp ASC
@@ -551,8 +591,7 @@ async def admin_view_conversation_detail(callback: types.CallbackQuery):
                 f"👤 <b>{user2_name}</b> (ID: <code>{user2[0]}</code>) @{user2_username}\n\n"
                 f"📭 <b>Сообщений не найдено</b>"
             )
-            await callback.message.edit_text(conversation_info, parse_mode="HTML")
-            await callback.answer()
+            await message.answer(conversation_info, parse_mode="HTML")
             return
         
         # Формируем историю переписки
@@ -562,6 +601,7 @@ async def admin_view_conversation_detail(callback: types.CallbackQuery):
             f"👤 <b>{user2_name}</b> (ID: <code>{user2[0]}</code>) @{user2_username}\n\n"
             f"📊 <b>Всего сообщений:</b> {len(messages)}\n"
             f"────────────────────\n\n"
+            f"<b>История переписки:</b>\n"
         )
         
         # Отображаем сообщения в виде переписки
@@ -572,15 +612,13 @@ async def admin_view_conversation_detail(callback: types.CallbackQuery):
             message_text = msg[3]
             timestamp = msg[4]
             is_revealed = msg[5]
-            sender_name = msg[6] or "Аноним"
-            receiver_name = msg[7] or "Получатель"
             
             # Определяем направление сообщения
             if sender_id == user1_id:
-                direction = "→"  # От user1 к user2
+                direction = "➡️"  # От user1 к user2
                 sender_display = user1_name
             else:
-                direction = "←"  # От user2 к user1
+                direction = "⬅️"  # От user2 к user1
                 sender_display = user2_name
             
             # Форматируем время
@@ -615,7 +653,6 @@ async def admin_view_conversation_detail(callback: types.CallbackQuery):
             f"• {user1_name}: {user1_sent} сообщений\n"
             f"• {user2_name}: {user2_sent} сообщений\n"
             f"• Всего: {len(messages)} сообщений\n\n"
-            f"🕐 <b>Период переписки:</b>\n"
         )
         
         # Показываем период переписки
@@ -634,6 +671,7 @@ async def admin_view_conversation_detail(callback: types.CallbackQuery):
                 else:
                     last_time = last_msg[4].strftime('%d.%m.%Y %H:%M')
                 
+                conversation_history += f"🕐 <b>Период переписки:</b>\n"
                 conversation_history += f"Начало: {first_time}\n"
                 conversation_history += f"Последнее: {last_time}\n"
             except:
@@ -643,27 +681,25 @@ async def admin_view_conversation_detail(callback: types.CallbackQuery):
         keyboard = admin_message_history_keyboard(user1_id, user2_id, 1, 1)
         
         if len(conversation_history) > 4096:
-            # Разбиваем на части если слишком длинное
+            # Разбиваем на части
             parts = [conversation_history[i:i+4000] for i in range(0, len(conversation_history), 4000)]
             for i, part in enumerate(parts):
                 if i == 0:
-                    await callback.message.edit_text(part, parse_mode="HTML", 
-                                                   disable_web_page_preview=True,
-                                                   reply_markup=keyboard if i == len(parts)-1 else None)
+                    await message.answer(part, parse_mode="HTML", 
+                                       disable_web_page_preview=True,
+                                       reply_markup=keyboard if i == len(parts)-1 else None)
                 else:
-                    await callback.message.answer(part, parse_mode="HTML", 
-                                                disable_web_page_preview=True,
-                                                reply_markup=keyboard if i == len(parts)-1 else None)
+                    await message.answer(part, parse_mode="HTML", 
+                                       disable_web_page_preview=True,
+                                       reply_markup=keyboard if i == len(parts)-1 else None)
         else:
-            await callback.message.edit_text(conversation_history, parse_mode="HTML", 
-                                           disable_web_page_preview=True,
-                                           reply_markup=keyboard)
-        
-        await callback.answer()
+            await message.answer(conversation_history, parse_mode="HTML", 
+                               disable_web_page_preview=True,
+                               reply_markup=keyboard)
         
     except Exception as e:
-        logger.error(f"Ошибка в admin_view_conversation_detail: {e}", exc_info=True)
-        await callback.answer("❌ Произошла ошибка")
+        logger.error(f"Ошибка в show_conversation_detail: {e}", exc_info=True)
+        await message.answer(f"❌ Ошибка загрузки переписки: {str(e)[:200]}")
 
 # ==================== ПОИСК ПО СОДЕРЖАНИЮ СООБЩЕНИЙ ====================
 
@@ -708,16 +744,14 @@ async def admin_search_messages_result(message: types.Message, state: FSMContext
                 am.is_revealed,
                 sender.telegram_id as sender_tg_id,
                 sender.first_name as sender_name,
-                sender.username as sender_username,
                 receiver.telegram_id as receiver_tg_id,
-                receiver.first_name as receiver_name,
-                receiver.username as receiver_username
+                receiver.first_name as receiver_name
             FROM anon_messages am
             LEFT JOIN users sender ON am.sender_id = sender.id
             LEFT JOIN users receiver ON am.receiver_id = receiver.id
             WHERE am.message_text LIKE :search_text
             ORDER BY am.timestamp DESC
-            LIMIT 20
+            LIMIT 15
         """, {"search_text": f"%{search_text}%"})
         
         if not messages:
@@ -738,10 +772,8 @@ async def admin_search_messages_result(message: types.Message, state: FSMContext
             is_revealed = msg[3]
             sender_tg_id = msg[4]
             sender_name = msg[5] or "Аноним"
-            sender_username = msg[6] or "нет"
-            receiver_tg_id = msg[7]
-            receiver_name = msg[8] or "Получатель"
-            receiver_username = msg[9] or "нет"
+            receiver_tg_id = msg[6]
+            receiver_name = msg[7] or "Получатель"
             
             # Форматируем время
             try:
@@ -754,12 +786,12 @@ async def admin_search_messages_result(message: types.Message, state: FSMContext
             
             # Обрезаем текст
             display_text = message_text
-            if len(display_text) > 80:
-                display_text = display_text[:80] + "..."
+            if len(display_text) > 50:
+                display_text = display_text[:50] + "..."
             
             search_results += (
                 f"{i}. 📨 <b>Сообщение ID: {msg_id}</b>\n"
-                f"   📝 Текст: {display_text}\n"
+                f"   📝 <i>{display_text}</i>\n"
                 f"   👤 От: {sender_name} (ID: <code>{sender_tg_id}</code>)\n"
                 f"   👥 Кому: {receiver_name} (ID: <code>{receiver_tg_id}</code>)\n"
                 f"   🕐 Время: {message_time}\n"
@@ -783,7 +815,7 @@ async def conversations_command(message: types.Message):
     await admin_conversations(message)
 
 @router.message(Command("find_conversation"), admin_filter)
-async def find_conversation_command(message: types.Message, state: FSMContext):
+async def find_conversation_command(message: types.Message):
     """Найти переписку по ID пользователей"""
     try:
         args = message.text.split()
@@ -796,7 +828,6 @@ async def find_conversation_command(message: types.Message, state: FSMContext):
             return
         
         search_query = args[1]
-        await message.answer(f"🔍 Ищу пользователя: {search_query}")
         
         users = []
         
@@ -832,7 +863,7 @@ async def find_conversation_command(message: types.Message, state: FSMContext):
             for i, user in enumerate(users[:5], 1):
                 user_id = user[0]
                 telegram_id = user[1]
-                first_name = user[3]
+                first_name = user[3] or "Без имени"
                 username = user[2] or "нет"
                 
                 result_text += (
@@ -861,6 +892,29 @@ async def find_conversation_by_id_command(message: types.Message):
         await message.answer("❌ Неверный формат ID")
     except Exception as e:
         await message.answer(f"❌ Ошибка: {e}")
+
+# ==================== ВСПОМОГАТЕЛЬНЫЕ ФУНКЦИИ ====================
+
+@router.callback_query(F.data == "back_to_conversations")
+async def back_to_conversations(callback: types.CallbackQuery):
+    """Вернуться к меню переписок"""
+    if not is_admin(callback.from_user.id):
+        await callback.answer("❌ Доступ запрещен")
+        return
+    
+    await admin_conversations(callback.message)
+    await callback.answer()
+
+@router.callback_query(F.data == "back_to_admin")
+async def back_to_admin(callback: types.CallbackQuery):
+    """Вернуться к админ-панели"""
+    if not is_admin(callback.from_user.id):
+        await callback.answer("❌ Доступ запрещен")
+        return
+    
+    from app.handlers.admin_panel import admin_panel
+    await admin_panel(callback.message)
+    await callback.answer()
 
 # Экспортируем router для подключения в основном файле
 __all__ = ['router']
