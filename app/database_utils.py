@@ -53,11 +53,10 @@ def get_user_by_id(user_id):
         logger.error(f"Ошибка получения пользователя {user_id}: {e}")
         return None
 
-def get_users_count():
+def get_users_count() -> int:
     """Получить количество пользователей"""
     try:
-        result = safe_execute_query("SELECT COUNT(*) FROM users")
-        return result.scalar() or 0
+        return safe_execute_scalar("SELECT COUNT(*) FROM users")
     except Exception as e:
         logger.error(f"Ошибка получения количества пользователей: {e}")
         return 0
