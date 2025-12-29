@@ -1,7 +1,7 @@
 """
 Админ-панель для управления ботом
 """
-from aiogram import F, Router, types, Bot  
+from aiogram import F, Router, types, Bot
 import os
 import sys
 import time
@@ -15,14 +15,14 @@ import asyncio
 from aiogram.types import Message, CallbackQuery, FSInputFile
 import json
 from app.database_manager import db_manager
-from app.database import get_db, force_reconnect, get_engine
+from app.database import get_db, force_reconnect, get_engine, get_session_local
 from app.models import User, AnonMessage, Payment
 from app.config import ADMIN_IDS
 from app.keyboards_admin import (
     admin_main_menu, admin_users_menu, admin_prices_menu,
     admin_stats_menu, admin_broadcast_menu, admin_user_actions_menu,
     admin_price_management_menu, admin_confirm_keyboard, admin_pagination_keyboard,
-    exit_admin_keyboard, admin_settings_menu
+    exit_admin_keyboard, admin_settings_menu, admin_conversations_menu
 )
 from app.keyboards import main_menu
 from app.price_service import price_service
@@ -30,11 +30,15 @@ from app.broadcast_service import broadcast_service
 from app.payment_service import payment_service
 from app.database_utils import (
     safe_execute_query,
+    safe_execute_query_fetchone,
+    safe_execute_query_fetchall,
+    safe_execute_scalar,
     get_user_by_id,
     get_users_count,
     get_messages_count,
     get_payments_count,
-    get_revenue
+    get_revenue,
+    get_table_stats
 )
 import logging
 
@@ -53,6 +57,7 @@ class AdminStates(StatesGroup):
     waiting_reveals_count = State()
     waiting_balance_change = State()
     waiting_system_message = State()
+    waiting_price_management = State()
 
 def is_admin(user_id: int):
     return user_id in ADMIN_IDS
@@ -109,7 +114,7 @@ async def admin_panel(message: types.Message):
 
             week_ago = datetime.now() - timedelta(days=7)
             result = conn.execute(
-                text("SELECT COUNT(DISTINCT sender_id) FROM anon_messages WHERE timestamp >= :week_ago"),
+                text("SELECT COUNT(DISTINCT CASE WHEN sender_id IS NOT NULL THEN sender_id ELSE receiver_id END) FROM anon_messages WHERE timestamp >= :week_ago"),
                 {"week_ago": week_ago}
             )
             active_users = result.scalar() or 0
@@ -534,11 +539,11 @@ async def admin_users(message: types.Message):
         total_users = get_users_count()
         
         today = datetime.now().date()
-        result = safe_execute_query(
+        result = safe_execute_query_fetchone(
             "SELECT COUNT(*) FROM users WHERE DATE(created_at) = :today",
             {"today": today}
         )
-        today_users = result.scalar() or 0
+        today_users = result[0] if result else 0
         
         users_message = (
             f"👥 <b>Управление пользователями</b>\n\n"
@@ -566,11 +571,11 @@ async def admin_users_callback(callback: types.CallbackQuery):
         total_users = get_users_count()
         
         today = datetime.now().date()
-        result = safe_execute_query(
+        result = safe_execute_query_fetchone(
             "SELECT COUNT(*) FROM users WHERE DATE(created_at) = :today",
             {"today": today}
         )
-        today_users = result.scalar() or 0
+        today_users = result[0] if result else 0
         
         response_message = (
             f"👥 <b>Управление пользователями</b>\n\n"
@@ -587,7 +592,6 @@ async def admin_users_callback(callback: types.CallbackQuery):
     except Exception as e:
         logger.error(f"Ошибка в admin_users_callback: {e}")
         await callback.answer("❌ Произошла ошибка")
-
 
 @router.callback_query(F.data == "admin_users_list")
 async def admin_users_list(callback: types.CallbackQuery):
@@ -664,7 +668,6 @@ async def admin_users_list(callback: types.CallbackQuery):
     except Exception as e:
         logger.error(f"Ошибка в admin_users_list: {e}", exc_info=True)
         await callback.answer("❌ Произошла ошибка при загрузке списка")
-
 
 @router.callback_query(F.data.startswith("admin_page_users_"))
 async def admin_users_page(callback: types.CallbackQuery):
@@ -913,8 +916,6 @@ async def admin_user_set_reveals_finish(message: types.Message, state: FSMContex
         user_data = await state.get_data()
         user_id = user_data.get('target_user_id')
         
-        from app.database import get_session_local
-        
         SessionLocal = get_session_local()
         db = SessionLocal()
         
@@ -991,7 +992,58 @@ async def admin_price_actions(callback: types.CallbackQuery):
 
     data = callback.data
     
-    if data.startswith("admin_price_"):
+    if data.startswith("admin_price_edit_"):
+        # Редактирование цены
+        package_id = data.replace("admin_price_edit_", "")
+        await state.set_state(AdminStates.waiting_price_value)
+        await state.update_data(editing_package=package_id)
+        
+        package = price_service.get_package_info(package_id)
+        await callback.message.answer(
+            f"✏️ <b>Изменение цены для пакета:</b> {package['name']}\n\n"
+            f"💰 Текущая цена: {price_service.format_price(package['current_price'])}\n"
+            f"🏷️ Базовая цена: {price_service.format_price(package['base_price'])}\n\n"
+            f"Введите новую цену в копейках (например, 10000 = 100₽):",
+            parse_mode="HTML"
+        )
+        
+    elif data.startswith("admin_price_discount_"):
+        # Установка скидки
+        package_id = data.replace("admin_price_discount_", "")
+        await state.set_state(AdminStates.waiting_discount_value)
+        await state.update_data(discount_package=package_id)
+        
+        package = price_service.get_package_info(package_id)
+        await callback.message.answer(
+            f"🎯 <b>Установка скидки для пакета:</b> {package['name']}\n\n"
+            f"💰 Текущая цена: {price_service.format_price(package['current_price'])}\n"
+            f"🏷️ Базовая цена: {price_service.format_price(package['base_price'])}\n"
+            f"🔥 Текущая скидка: {package['discount']}%\n\n"
+            f"Введите новую скидку (0-100%):",
+            parse_mode="HTML"
+        )
+        
+    elif data.startswith("admin_price_toggle_"):
+        # Включение/выключение пакета
+        package_id = data.replace("admin_price_toggle_", "")
+        package = price_service.get_package_info(package_id)
+        
+        new_status = not package["active"]
+        price_service.toggle_package(package_id, new_status)
+        
+        status_text = "🟢 Включен" if new_status else "🔴 Выключен"
+        await callback.message.answer(
+            f"✅ <b>Статус пакета изменен!</b>\n\n"
+            f"📦 Пакет: {package['name']}\n"
+            f"📊 Статус: {status_text}",
+            parse_mode="HTML"
+        )
+        
+        # Обновляем меню
+        await admin_prices_callback(callback)
+        
+    else:
+        # Просмотр информации о пакете
         package_id = data.replace("admin_price_", "")
         if package_id in price_service.get_all_packages():
             package = price_service.get_package_info(package_id)
@@ -1091,30 +1143,30 @@ async def admin_stats(message: types.Message):
         total_users = get_users_count()
         
         week_ago = (datetime.now() - timedelta(days=7)).strftime('%Y-%m-%d')
-        result = safe_execute_query(
+        result = safe_execute_query_fetchone(
             "SELECT COUNT(*) FROM users WHERE DATE(created_at) >= :week_ago",
             {"week_ago": week_ago}
         )
-        week_users = result.scalar() or 0
+        week_users = result[0] if result else 0
         
         total_messages = get_messages_count()
         
-        result = safe_execute_query(
+        result = safe_execute_query_fetchone(
             "SELECT COUNT(*) FROM anon_messages WHERE DATE(timestamp) >= :week_ago",
             {"week_ago": week_ago}
         )
-        week_messages = result.scalar() or 0
+        week_messages = result[0] if result else 0
         
         total_payments = get_payments_count()
         total_revenue = get_revenue()
         
         package_stats = {}
         for package_id in price_service.get_all_packages():
-            result = safe_execute_query(
+            result = safe_execute_query_fetchone(
                 "SELECT COUNT(*) FROM payments WHERE payment_type = :package_id AND status = 'completed'",
                 {"package_id": package_id}
             )
-            count = result.scalar() or 0
+            count = result[0] if result else 0
             package_stats[package_id] = count
 
         stats_message = (
@@ -1152,30 +1204,30 @@ async def admin_stats_callback(callback: types.CallbackQuery):
         total_users = get_users_count()
         
         week_ago = (datetime.now() - timedelta(days=7)).strftime('%Y-%m-%d')
-        result = safe_execute_query(
+        result = safe_execute_query_fetchone(
             "SELECT COUNT(*) FROM users WHERE DATE(created_at) >= :week_ago",
             {"week_ago": week_ago}
         )
-        week_users = result.scalar() or 0
+        week_users = result[0] if result else 0
         
         total_messages = get_messages_count()
         
-        result = safe_execute_query(
+        result = safe_execute_query_fetchone(
             "SELECT COUNT(*) FROM anon_messages WHERE DATE(timestamp) >= :week_ago",
             {"week_ago": week_ago}
         )
-        week_messages = result.scalar() or 0
+        week_messages = result[0] if result else 0
         
         total_payments = get_payments_count()
         total_revenue = get_revenue()
         
         package_stats = {}
         for package_id in price_service.get_all_packages():
-            result = safe_execute_query(
+            result = safe_execute_query_fetchone(
                 "SELECT COUNT(*) FROM payments WHERE payment_type = :package_id AND status = 'completed'",
                 {"package_id": package_id}
             )
-            count = result.scalar() or 0
+            count = result[0] if result else 0
             package_stats[package_id] = count
 
         stats_message = (
@@ -1214,8 +1266,8 @@ async def admin_broadcast(message: types.Message):
     try:
         total_users = get_users_count()
         
-        result = safe_execute_query("SELECT COUNT(*) FROM users WHERE anon_link_uid IS NOT NULL")
-        active_users = result.scalar() or 0
+        result = safe_execute_query_fetchone("SELECT COUNT(*) FROM users WHERE anon_link_uid IS NOT NULL")
+        active_users = result[0] if result else 0
         
         broadcast_message = (
             "📢 <b>Система рассылок</b>\n\n"
@@ -1243,8 +1295,8 @@ async def admin_broadcast_callback(callback: types.CallbackQuery):
     try:
         total_users = get_users_count()
         
-        result = safe_execute_query("SELECT COUNT(*) FROM users WHERE anon_link_uid IS NOT NULL")
-        active_users = result.scalar() or 0
+        result = safe_execute_query_fetchone("SELECT COUNT(*) FROM users WHERE anon_link_uid IS NOT NULL")
+        active_users = result[0] if result else 0
         
         broadcast_message = (
             "📢 <b>Система рассылок</b>\n\n"
@@ -1297,10 +1349,15 @@ async def admin_broadcast_all_send(message: types.Message, state: FSMContext):
     
     await message.answer("🔄 <b>Начинаю рассылку...</b>", parse_mode="HTML")
     
-    await broadcast_service.broadcast_to_all(
+    success = await broadcast_service.broadcast_to_all(
         message.text,
         message.from_user.id
     )
+    
+    if success:
+        await message.answer("✅ <b>Рассылка завершена!</b>", parse_mode="HTML")
+    else:
+        await message.answer("❌ <b>Ошибка рассылки</b>", parse_mode="HTML")
     
     await state.clear()
 
@@ -1369,6 +1426,148 @@ async def admin_settings(message: types.Message):
     )
     
     await message.answer(settings_message, parse_mode="HTML", reply_markup=admin_settings_menu())
+
+@router.callback_query(F.data == "admin_backup")
+async def admin_backup_callback(callback: types.CallbackQuery):
+    """Создание бэкапа БД"""
+    if not is_admin(callback.from_user.id):
+        await callback.answer("❌ Доступ запрещен")
+        return
+    
+    await cmd_backup(callback.message)
+    await callback.answer()
+
+@router.callback_query(F.data == "admin_restore")
+async def admin_restore_callback(callback: types.CallbackQuery):
+    """Восстановление БД"""
+    if not is_admin(callback.from_user.id):
+        await callback.answer("❌ Доступ запрещен")
+        return
+    
+    await cmd_restore(callback.message)
+    await callback.answer()
+
+@router.callback_query(F.data == "admin_db_status")
+async def admin_db_status_callback(callback: types.CallbackQuery):
+    """Статус БД"""
+    if not is_admin(callback.from_user.id):
+        await callback.answer("❌ Доступ запрещен")
+        return
+    
+    await db_status_command(callback.message)
+    await callback.answer()
+
+@router.callback_query(F.data == "admin_cleanup")
+async def admin_cleanup_callback(callback: types.CallbackQuery):
+    """Очистка данных"""
+    if not is_admin(callback.from_user.id):
+        await callback.answer("❌ Доступ запрещен")
+        return
+    
+    await cleanup_old_data_command(callback.message)
+    await callback.answer()
+
+@router.callback_query(F.data == "admin_backups_list")
+async def admin_backups_list_callback(callback: types.CallbackQuery):
+    """Список бэкапов"""
+    if not is_admin(callback.from_user.id):
+        await callback.answer("❌ Доступ запрещен")
+        return
+    
+    await cmd_backups(callback.message)
+    await callback.answer()
+
+@router.callback_query(F.data == "admin_export")
+async def admin_export_callback(callback: types.CallbackQuery):
+    """Экспорт данных"""
+    if not is_admin(callback.from_user.id):
+        await callback.answer("❌ Доступ запрещен")
+        return
+    
+    try:
+        from app.database_manager import db_manager
+        sql_file = 'data/database_export.sql'
+        
+        success = db_manager.export_to_sql(sql_file)
+        
+        if success and os.path.exists(sql_file):
+            file_size = os.path.getsize(sql_file)
+            file_size_mb = file_size / (1024 * 1024)
+            
+            await callback.message.answer(
+                f"✅ <b>Экспорт завершен!</b>\n\n"
+                f"📁 Файл: <code>{os.path.basename(sql_file)}</code>\n"
+                f"📊 Размер: {file_size_mb:.2f} MB",
+                parse_mode="HTML"
+            )
+            
+            if file_size_mb < 50:
+                await callback.message.answer_document(
+                    FSInputFile(sql_file),
+                    caption="📁 Экспорт базы данных в SQL"
+                )
+        else:
+            await callback.message.answer("❌ Ошибка экспорта данных")
+    except Exception as e:
+        await callback.message.answer(f"❌ Ошибка: {str(e)[:200]}")
+    
+    await callback.answer()
+
+# ==================== УПРАВЛЕНИЕ ПЕРЕПИСКАМИ ====================
+
+@router.message(F.text == "💬 Переписки")
+async def admin_conversations_command(message: types.Message):
+    """Обработчик кнопки переписок"""
+    if not is_admin(message.from_user.id):
+        await message.answer("❌ Доступ запрещен")
+        return
+    
+    try:
+        # Получаем статистику по перепискам
+        total_conversations = safe_execute_scalar("""
+            SELECT COUNT(DISTINCT CASE 
+                WHEN sender_id < receiver_id THEN sender_id || '-' || receiver_id 
+                ELSE receiver_id || '-' || sender_id 
+            END)
+            FROM anon_messages 
+            WHERE sender_id IS NOT NULL AND receiver_id IS NOT NULL
+        """) or 0
+        
+        today_messages = safe_execute_scalar(
+            "SELECT COUNT(*) FROM anon_messages WHERE DATE(timestamp) = DATE('now')"
+        ) or 0
+        
+        week_messages = safe_execute_scalar(
+            "SELECT COUNT(*) FROM anon_messages WHERE timestamp >= datetime('now', '-7 days')"
+        ) or 0
+        
+        users_with_messages = safe_execute_scalar("""
+            SELECT COUNT(DISTINCT CASE 
+                WHEN sender_id IS NOT NULL THEN sender_id 
+                ELSE receiver_id 
+            END)
+            FROM anon_messages
+        """) or 0
+        
+        conversations_message = (
+            "💬 <b>Управление переписками</b>\n\n"
+            "📊 <b>Статистика переписок:</b>\n"
+            f"• 👥 Пользователей с переписками: <b>{users_with_messages}</b>\n"
+            f"• 💬 Активных диалогов: <b>{total_conversations}</b>\n"
+            f"• 📨 Сообщений сегодня: <b>{today_messages}</b>\n"
+            f"• 📨 Сообщений за неделю: <b>{week_messages}</b>\n\n"
+            "🔍 <b>Доступные действия:</b>\n"
+            "• Просмотр переписок пользователей\n"
+            "• Поиск пользователей по перепискам\n"
+            "• Просмотр истории сообщений\n"
+        )
+        
+        await message.answer(conversations_message, parse_mode="HTML", 
+                           reply_markup=admin_conversations_menu())
+        
+    except Exception as e:
+        logger.error(f"Ошибка в admin_conversations_command: {e}")
+        await message.answer(f"❌ Ошибка получения статистики: {str(e)[:200]}")
 
 # ==================== ОБНОВЛЕНИЕ ====================
 
@@ -1450,9 +1649,7 @@ async def backup_now_command(message: types.Message):
     await message.answer("🔄 Создаю резервную копию...")
     
     try:
-        from app.backup_service import backup_service
-        
-        backup_path = backup_service.create_backup()
+        backup_path = db_manager.create_backup()
         
         if backup_path:
             backup_name = os.path.basename(backup_path)
@@ -1463,8 +1660,7 @@ async def backup_now_command(message: types.Message):
                 f"✅ <b>Backup создан!</b>\n\n"
                 f"📁 Файл: <code>{backup_name}</code>\n"
                 f"📦 Размер: {file_size_mb:.2f} MB\n"
-                f"⏰ Время: {datetime.now().strftime('%H:%M:%S')}\n\n"
-                f"📤 Файл автоматически отправлен в Telegram всем админам.",
+                f"⏰ Время: {datetime.now().strftime('%H:%M:%S')}",
                 parse_mode="HTML"
             )
         else:
@@ -1479,14 +1675,13 @@ async def payment_status_command(message: types.Message):
     try:
         total_payments = get_payments_count()
         
-        result = safe_execute_query("SELECT COUNT(*) FROM payments WHERE status = 'pending'")
-        pending_payments = result.scalar() or 0
+        result = safe_execute_query_fetchone("SELECT COUNT(*) FROM payments WHERE status = 'pending'")
+        pending_payments = result[0] if result else 0
         
         total_revenue = get_revenue()
         
         status_message = (
             "🔄 <b>Статус платежной системы</b>\n\n"
-            "❌ <b>Автоматические платежи отключены</b>\n\n"
             f"📊 <b>Статистика:</b>\n"
             f"• 💰 Всего продаж: <b>{total_payments}</b>\n"
             f"• ⏳ Ожидающих платежей: <b>{pending_payments}</b>\n"
@@ -1516,47 +1711,42 @@ async def user_info_command(message: types.Message):
 
         telegram_id = int(args[1])
         
-        result = safe_execute_query(
+        result = safe_execute_query_fetchone(
             "SELECT * FROM users WHERE telegram_id = :telegram_id",
             {"telegram_id": telegram_id}
         )
-        user = result.fetchone()
         
-        if not user:
+        if not result:
             await message.answer("❌ Пользователь не найден")
             return
 
-        user_id = user[0]
-        telegram_id = user[1]
-        first_name = user[3]
-        username = user[2] or "не указан"
-        available_reveals = user[10] or 0
-        anon_link_uid = user[5] or "нет"
-        created_at = user[6]
+        user_id = result[0]
+        telegram_id = result[1]
+        first_name = result[3]
+        username = result[2] or "не указан"
+        available_reveals = result[10] or 0
+        anon_link_uid = result[5] or "нет"
+        created_at = result[6]
         
-        result = safe_execute_query(
+        sent_messages = safe_execute_scalar(
             "SELECT COUNT(*) FROM anon_messages WHERE sender_id = :user_id",
             {"user_id": user_id}
         )
-        sent_messages = result.scalar() or 0
         
-        result = safe_execute_query(
+        received_messages = safe_execute_scalar(
             "SELECT COUNT(*) FROM anon_messages WHERE receiver_id = :user_id",
             {"user_id": user_id}
         )
-        received_messages = result.scalar() or 0
         
-        result = safe_execute_query(
+        total_payments = safe_execute_scalar(
             "SELECT COUNT(*) FROM payments WHERE user_id = :user_id AND status = 'completed'",
             {"user_id": user_id}
         )
-        total_payments = result.scalar() or 0
         
-        result = safe_execute_query(
+        total_spent = safe_execute_scalar(
             "SELECT COALESCE(SUM(amount), 0) FROM payments WHERE user_id = :user_id AND status = 'completed'",
             {"user_id": user_id}
         )
-        total_spent = result.scalar() or 0
         
         if isinstance(created_at, str):
             created_date = created_at[:19].replace('T', ' ')
@@ -1601,8 +1791,6 @@ async def set_reveals_command(message: types.Message):
         telegram_id = int(args[1])
         new_count = int(args[2])
         
-        from app.database import get_session_local
-        
         SessionLocal = get_session_local()
         db = SessionLocal()
         
@@ -1633,25 +1821,27 @@ async def set_reveals_command(message: types.Message):
 async def db_status_command(message: types.Message):
     """Статус базы данных"""
     try:
-        from app.backup_service import backup_service
-        size_mb = backup_service.get_db_size()
-        stats = backup_service.get_db_stats()
+        db_info = db_manager.get_db_info()
+        
+        # Получаем статистику таблиц
+        table_stats = get_table_stats()
         
         status_message = (
             "📊 <b>Статус базы данных</b>\n\n"
-            f"💾 Размер: <b>{size_mb:.2f} MB</b>\n"
-            f"👥 Пользователей: <b>{stats.get('users', 'N/A')}</b>\n"
-            f"📨 Сообщений: <b>{stats.get('messages', 'N/A')}</b>\n"
-            f"💰 Платежей: <b>{stats.get('payments', 'N/A')}</b>\n"
-            f"⏳ Ожидающих платежей: <b>{stats.get('pending_payments', 'N/A')}</b>\n\n"
+            f"💾 Размер: <b>{db_info.get('size_mb', 0):.2f} MB</b>\n"
+            f"📂 Таблиц: <b>{db_info.get('table_count', 0)}</b>\n"
+            f"📝 Записей: <b>{db_info.get('total_records', 0)}</b>\n"
+            f"🕐 Последнее изменение: <b>{db_info.get('last_modified', 'неизвестно')}</b>\n\n"
         )
         
-        if size_mb > backup_service.critical_size_mb:
-            status_message += "🚨 <b>КРИТИЧЕСКИЙ РАЗМЕР!</b>"
-        elif size_mb > backup_service.max_size_mb:
-            status_message += "⚠️ <b>Большой размер</b>"
-        else:
-            status_message += "✅ <b>Размер в норме</b>"
+        if 'users' in table_stats:
+            status_message += f"👥 Пользователей: <b>{table_stats['users']}</b>\n"
+        if 'anon_messages' in table_stats:
+            status_message += f"📨 Сообщений: <b>{table_stats['anon_messages']}</b>\n"
+        if 'payments' in table_stats:
+            status_message += f"💰 Платежей: <b>{table_stats['payments']}</b>\n"
+        
+        status_message += f"\n📁 Файл: <code>{db_info.get('path', 'неизвестно')}</code>"
         
         await message.answer(status_message, parse_mode="HTML")
         
@@ -1659,22 +1849,47 @@ async def db_status_command(message: types.Message):
         await message.answer(f"❌ Ошибка получения статуса БД: {e}")
 
 @router.message(Command("cleanup_old_data"), admin_filter)
-async def cleanup_old_data_command(message: types.Message):
+async def cleanup_old_data_command(message: Message):
     """Очистка старых данных"""
     await message.answer("🔄 Очищаю старые данные...")
     
     try:
-        from app.database_cleaner import db_cleaner
-        deleted_messages, deleted_payments = await db_cleaner.cleanup_old_data()
+        # Удаляем сообщения старше 6 месяцев
+        six_months_ago = datetime.now() - timedelta(days=180)
+        deleted_messages = safe_execute_scalar(
+            "SELECT COUNT(*) FROM anon_messages WHERE timestamp < :six_months_ago",
+            {"six_months_ago": six_months_ago}
+        )
         
-        from app.backup_service import backup_service
-        new_size = backup_service.get_db_size()
+        result = safe_execute_query(
+            "DELETE FROM anon_messages WHERE timestamp < :six_months_ago",
+            {"six_months_ago": six_months_ago}
+        )
+        
+        # Удаляем неактивные пользователи (без сообщений и без ссылок)
+        deleted_users = safe_execute_scalar("""
+            SELECT COUNT(*) FROM users 
+            WHERE anon_link_uid IS NULL 
+            AND id NOT IN (SELECT DISTINCT sender_id FROM anon_messages WHERE sender_id IS NOT NULL)
+            AND id NOT IN (SELECT DISTINCT receiver_id FROM anon_messages)
+            AND created_at < datetime('now', '-30 days')
+        """)
+        
+        result = safe_execute_query("""
+            DELETE FROM users 
+            WHERE anon_link_uid IS NULL 
+            AND id NOT IN (SELECT DISTINCT sender_id FROM anon_messages WHERE sender_id IS NOT NULL)
+            AND id NOT IN (SELECT DISTINCT receiver_id FROM anon_messages)
+            AND created_at < datetime('now', '-30 days')
+        """)
+        
+        db_info = db_manager.get_db_info()
         
         await message.answer(
             "🧹 <b>Очистка завершена</b>\n\n"
             f"📨 Удалено сообщений: <b>{deleted_messages}</b>\n"
-            f"💰 Удалено платежей: <b>{deleted_payments}</b>\n"
-            f"💾 Новый размер БД: <b>{new_size:.2f} MB</b>",
+            f"👥 Удалено пользователей: <b>{deleted_users}</b>\n"
+            f"💾 Новый размер БД: <b>{db_info.get('size_mb', 0):.2f} MB</b>",
             parse_mode="HTML"
         )
         
@@ -1682,7 +1897,7 @@ async def cleanup_old_data_command(message: types.Message):
         await message.answer(f"❌ Ошибка очистки данных: {e}")
 
 @router.message(Command("upload_db"), admin_filter)
-async def upload_db_command(message: types.Message):
+async def upload_db_command(message: Message):
     """Инструкция по загрузке базы данных"""
     await message.answer(
         "📁 <b>Загрузка базы данных</b>\n\n"
@@ -1705,7 +1920,7 @@ async def upload_db_command(message: types.Message):
     )
 
 @router.message(Command("stats"), admin_filter)
-async def stats_command(message: types.Message):
+async def stats_command(message: Message):
     """Быстрая статистика"""
     try:
         total_users = get_users_count()
@@ -1726,13 +1941,10 @@ async def stats_command(message: types.Message):
     except Exception as e:
         await message.answer(f"❌ Ошибка получения статистики: {e}")
 
-
 @router.message(Command("check_backups"), admin_filter)
 async def check_backups_command(message: Message):
     """Проверить все бэкапы на наличие данных"""
     try:
-        from app.database_manager import db_manager
-        
         backups = db_manager.list_backups()
         
         if not backups:
@@ -1941,21 +2153,17 @@ async def full_backup_command(message: Message):
         logger.error(f"❌ Ошибка создания полного бэкапа: {e}")
         await message.answer(f"❌ Ошибка: {str(e)[:200]}")
 
-
-
-@router.message(F.text.startswith("/check_backup_"), admin_filter)
+@router.message(Command("check_backup"), admin_filter)
 async def check_specific_backup_command(message: Message):
     """Проверить конкретный бэкап по номеру"""
     try:
-        from app.database_manager import db_manager
-        
-        cmd_parts = message.text.split("_")
-        if len(cmd_parts) != 3:
-            await message.answer("❌ Неверный формат команды")
+        cmd_parts = message.text.split()
+        if len(cmd_parts) != 2:
+            await message.answer("❌ Использование: /check_backup номер_бэкапа")
             return
         
         try:
-            backup_index = int(cmd_parts[2])
+            backup_index = int(cmd_parts[1])
         except ValueError:
             await message.answer("❌ Неверный номер бэкапа")
             return
@@ -2075,8 +2283,6 @@ async def check_specific_backup_command(message: Message):
 async def restore_from_check_callback(callback: CallbackQuery):
     """Восстановить из бэкапа проверенного командой /check_backup"""
     try:
-        from app.database_manager import db_manager
-        
         backup_index = int(callback.data.replace("restore_from_check_", ""))
         
         backups = db_manager.list_backups()
@@ -2138,15 +2344,99 @@ async def restore_from_check_callback(callback: CallbackQuery):
         await callback.message.answer(f"❌ Ошибка: {str(e)[:200]}")
         await callback.answer()
 
+@router.callback_query(F.data.startswith("delete_backup_"))
+async def delete_backup_callback(callback: CallbackQuery):
+    """Удалить бэкап"""
+    try:
+        backup_index = int(callback.data.replace("delete_backup_", ""))
+        
+        backups = db_manager.list_backups()
+        if not 1 <= backup_index <= len(backups):
+            await callback.answer("❌ Неверный номер бэкапа")
+            return
+        
+        selected_backup = backups[backup_index - 1]
+        
+        # Подтверждение удаления
+        from aiogram.types import InlineKeyboardMarkup, InlineKeyboardButton
+        
+        keyboard = InlineKeyboardMarkup(
+            inline_keyboard=[
+                [
+                    InlineKeyboardButton(
+                        text="✅ Да, удалить", 
+                        callback_data=f"confirm_delete_{backup_index}"
+                    ),
+                    InlineKeyboardButton(
+                        text="❌ Отмена", 
+                        callback_data=f"cancel_delete"
+                    )
+                ]
+            ]
+        )
+        
+        await callback.message.answer(
+            f"🗑️ <b>Удаление бэкапа:</b>\n\n"
+            f"📁 Файл: <code>{selected_backup['name']}</code>\n"
+            f"📊 Размер: {selected_backup['size_mb']:.2f} MB\n"
+            f"📅 Создан: {selected_backup['created'].strftime('%d.%m.%Y %H:%M')}\n\n"
+            f"⚠️ <b>Вы уверены, что хотите удалить этот бэкап?</b>",
+            parse_mode="HTML",
+            reply_markup=keyboard
+        )
+        
+        await callback.answer()
+        
+    except Exception as e:
+        logger.error(f"❌ Ошибка удаления бэкапа: {e}")
+        await callback.answer("❌ Ошибка")
 
+@router.callback_query(F.data.startswith("confirm_delete_"))
+async def confirm_delete_backup_callback(callback: CallbackQuery):
+    """Подтверждение удаления бэкапа"""
+    try:
+        backup_index = int(callback.data.replace("confirm_delete_", ""))
+        
+        backups = db_manager.list_backups()
+        if not 1 <= backup_index <= len(backups):
+            await callback.answer("❌ Неверный номер бэкапа")
+            return
+        
+        selected_backup = backups[backup_index - 1]
+        
+        # Удаляем файл
+        try:
+            os.remove(selected_backup["path"])
+            await callback.message.answer(
+                f"🗑️ <b>Бэкап удален!</b>\n\n"
+                f"📁 Файл: <code>{selected_backup['name']}</code>\n"
+                f"✅ Успешно удален",
+                parse_mode="HTML"
+            )
+        except Exception as e:
+            await callback.message.answer(
+                f"❌ <b>Ошибка удаления!</b>\n\n"
+                f"Не удалось удалить файл: {str(e)[:100]}",
+                parse_mode="HTML"
+            )
+        
+        await callback.answer()
+        
+    except Exception as e:
+        logger.error(f"❌ Ошибка подтверждения удаления бэкапа: {e}")
+        await callback.answer("❌ Ошибка")
+
+@router.callback_query(F.data == "cancel_delete")
+async def cancel_delete_backup_callback(callback: CallbackQuery):
+    """Отмена удаления бэкапа"""
+    await callback.message.answer("❌ Удаление отменено")
+    await callback.answer()
 
 @router.message(Command("fix_backups"), admin_filter)
 async def fix_backups_command(message: Message):
     """Исправить все пустые бэкапы, создав новые правильные"""
     try:
         await message.answer("🔧 <b>Начинаю исправление бэкапов...</b>", parse_mode="HTML")
-        
-        from app.database_manager import db_manager
         
         # Сначала создаем правильный полный бэкап
         await message.answer("💾 <b>Создаю правильный полный бэкап...</b>", parse_mode="HTML")
@@ -2251,7 +2541,6 @@ async def fix_backups_command(message: Message):
     except Exception as e:
         logger.error(f"❌ Ошибка исправления бэкапов: {e}")
         await message.answer(f"❌ Ошибка: {str(e)[:200]}")
-
 
 @router.message(Command("emergency_fix_db"), admin_filter)
 async def emergency_fix_db_command(message: Message):
@@ -2369,7 +2658,6 @@ async def emergency_fix_db_command(message: Message):
         conn.close()
         
         # Добавляем администратора
-        from app.config import ADMIN_IDS
         if ADMIN_IDS:
             admin_id = ADMIN_IDS[0]
             try:
@@ -2390,8 +2678,6 @@ async def emergency_fix_db_command(message: Message):
         await asyncio.sleep(2)
         
         # Получаем финальную статистику
-        from app.database import get_engine
-        from sqlalchemy import text
         engine = get_engine()
         with engine.connect() as conn:
             result = conn.execute(text("SELECT COUNT(*) FROM users"))
@@ -2569,7 +2855,6 @@ async def force_backup_command(message: Message):
             # Отправляем файл если он не слишком большой
             if backup_size_mb < 20:
                 try:
-                    from aiogram.types import FSInputFile
                     await message.answer_document(
                         FSInputFile(backup_path),
                         caption=f"📁 ПРИНУДИТЕЛЬНЫЙ бэкап\n👥 {user_count} пользователей"
@@ -2591,26 +2876,147 @@ async def force_backup_command(message: Message):
     except Exception as e:
         await message.answer(f"❌ Ошибка: {str(e)[:200]}")
 
+# ==================== ДОПОЛНИТЕЛЬНЫЕ УЛУЧШЕНИЯ ====================
 
+@router.message(Command("help_admin"), admin_filter)
+async def help_admin_command(message: Message):
+    """Справка по админским командам"""
+    help_text = """
+👑 <b>АДМИНСКИЕ КОМАНДЫ</b>
 
+<b>Основные команды:</b>
+<code>/admin</code> - Открыть админ-панель
+<code>/stats</code> - Быстрая статистика
+<code>/user_info ID</code> - Информация о пользователе
+<code>/set_reveals ID количество</code> - Установить раскрытия
 
+<b>Управление БД:</b>
+<code>/backup_now</code> - Создать бэкап сейчас
+<code>/backups</code> - Список бэкапов
+<code>/restore</code> - Восстановить БД
+<code>/reload_db</code> - Перезагрузить подключение к БД
+<code>/db_status</code> - Статус БД
+<code>/db_structure</code> - Структура БД
+<code>/upload_db</code> - Загрузить БД
 
+<b>Бэкапы:</b>
+<code>/full_backup</code> - Полный бэкап с данными
+<code>/force_backup</code> - Принудительный бэкап
+<code>/check_backups</code> - Проверить все бэкапы
+<code>/check_backup номер</code> - Проверить конкретный бэкап
+<code>/fix_backups</code> - Исправить бэкапы
 
+<b>Очистка и обслуживание:</b>
+<code>/cleanup_old_data</code> - Очистка старых данных
+<code>/emergency_fix_db</code> - Экстренное исправление БД
 
+<b>Монетизация:</b>
+<code>/payment_status</code> - Статус платежей
 
+<b>Рассылки:</b>
+Используйте кнопку "Рассылка" в админ-панели
 
+<b>Переписки:</b>
+Используйте кнопку "Переписки" в админ-панели
+<code>/conversations</code> - Управление переписками
+<code>/find_conversation ID</code> - Найти переписку
 
+📊 <b>СОВЕТ:</b> Используйте админ-панель для большинства действий!
+"""
+    
+    await message.answer(help_text, parse_mode="HTML")
 
+@router.message(Command("system_info"), admin_filter)
+async def system_info_command(message: Message):
+    """Информация о системе"""
+    try:
+        import platform
+        import psutil
+        
+        # Информация о системе
+        system_info = f"🖥️ <b>Информация о системе</b>\n\n"
+        system_info += f"<b>ОС:</b> {platform.system()} {platform.release()}\n"
+        system_info += f"<b>Процессор:</b> {platform.processor()}\n"
+        
+        # Использование памяти
+        memory = psutil.virtual_memory()
+        system_info += f"<b>Память:</b> {memory.percent}% использовано\n"
+        
+        # Информация о БД
+        db_info = db_manager.get_db_info()
+        system_info += f"\n<b>База данных:</b>\n"
+        system_info += f"• Размер: {db_info.get('size_mb', 0):.2f} MB\n"
+        system_info += f"• Таблиц: {db_info.get('table_count', 0)}\n"
+        system_info += f"• Записей: {db_info.get('total_records', 0)}\n"
+        
+        # Статистика бота
+        system_info += f"\n<b>Статистика бота:</b>\n"
+        system_info += f"• Пользователей: {get_users_count()}\n"
+        system_info += f"• Сообщений: {get_messages_count()}\n"
+        system_info += f"• Платежей: {get_payments_count()}\n"
+        
+        # Время работы
+        import time
+        uptime_seconds = time.time() - psutil.boot_time()
+        uptime_hours = uptime_seconds // 3600
+        uptime_minutes = (uptime_seconds % 3600) // 60
+        
+        system_info += f"\n<b>Время работы системы:</b> {int(uptime_hours)}ч {int(uptime_minutes)}м\n"
+        
+        await message.answer(system_info, parse_mode="HTML")
+        
+    except Exception as e:
+        await message.answer(f"❌ Ошибка получения информации о системе: {str(e)[:200]}")
 
-
-
-
-
-
-
-
-
-
-
-
-
+@router.message(Command("test_db"), admin_filter)
+async def test_db_command(message: Message):
+    """Тест подключения к БД"""
+    try:
+        await message.answer("🔍 <b>Тестирую подключение к БД...</b>", parse_mode="HTML")
+        
+        # Тест 1: Подключение к БД
+        engine = get_engine()
+        with engine.connect() as conn:
+            await message.answer("✅ <b>Подключение успешно!</b>", parse_mode="HTML")
+            
+            # Тест 2: Проверка таблиц
+            result = conn.execute(text("SELECT name FROM sqlite_master WHERE type='table'"))
+            tables = [row[0] for row in result.fetchall()]
+            
+            await message.answer(f"✅ <b>Таблицы найдены:</b> {len(tables)}", parse_mode="HTML")
+            
+            # Тест 3: Проверка основных таблиц
+            required_tables = ['users', 'anon_messages', 'payments']
+            missing_tables = [t for t in required_tables if t not in tables]
+            
+            if missing_tables:
+                await message.answer(f"❌ <b>Отсутствуют таблицы:</b> {', '.join(missing_tables)}", 
+                                   parse_mode="HTML")
+            else:
+                await message.answer("✅ <b>Все основные таблицы присутствуют</b>", parse_mode="HTML")
+                
+                # Тест 4: Проверка записей
+                for table in required_tables:
+                    result = conn.execute(text(f"SELECT COUNT(*) FROM {table}"))
+                    count = result.scalar() or 0
+                    await message.answer(f"📊 <b>{table}:</b> {count} записей", parse_mode="HTML")
+        
+        # Тест 5: Проверка функций из database_utils
+        await message.answer("🔍 <b>Тестирую функции БД...</b>", parse_mode="HTML")
+        
+        user_count = get_users_count()
+        message_count = get_messages_count()
+        payment_count = get_payments_count()
+        
+        await message.answer(
+            f"✅ <b>Функции БД работают:</b>\n"
+            f"• Пользователей: {user_count}\n"
+            f"• Сообщений: {message_count}\n"
+            f"• Платежей: {payment_count}",
+            parse_mode="HTML"
+        )
+        
+        await message.answer("🎉 <b>ВСЕ ТЕСТЫ ПРОЙДЕНЫ УСПЕШНО!</b>", parse_mode="HTML")
+        
+    except Exception as e:
+        await message.answer(f"❌ <b>ОШИБКА ТЕСТА:</b> {str(e)[:200]}", parse_mode="HTML")
