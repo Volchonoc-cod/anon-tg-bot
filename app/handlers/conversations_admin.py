@@ -687,7 +687,7 @@ async def show_conversation_detail(message: types.Message, user1_id: int, user2_
                 am.id,
                 am.sender_id,
                 am.receiver_id,
-                am.text,  # ИСПРАВЛЕНО: было am.message_text
+                am.text,  
                 am.timestamp,
                 am.is_revealed
             FROM anon_messages am
@@ -753,7 +753,7 @@ async def show_conversation_detail(message: types.Message, user1_id: int, user2_
             msg_id = msg[0]
             sender_id = msg[1]
             receiver_id = msg[2]
-            message_text = msg[3]  # ИСПРАВЛЕНО: поле text
+            message_text = msg[3]  
             timestamp = msg[4]
             is_revealed = msg[5]
             
@@ -867,7 +867,7 @@ async def admin_search_messages_result(message: types.Message, state: FSMContext
         messages = safe_execute_query_fetchall("""
             SELECT 
                 am.id,
-                am.text,  # ИСПРАВЛЕНО: было am.message_text
+                am.text,  
                 am.timestamp,
                 am.is_revealed,
                 sender.telegram_id as sender_tg_id,
@@ -1222,7 +1222,7 @@ async def admin_send_anonymous_final(message: types.Message, state: FSMContext, 
                 """
                 INSERT INTO anon_messages (sender_id, receiver_id, text, timestamp, is_revealed)
                 VALUES (:sender_id, :receiver_id, :message_text, datetime('now'), 0)
-                """,  # ИСПРАВЛЕНО: text вместо message_text
+                """,  
                 {"sender_id": sender_id, "receiver_id": receiver_id, "message_text": message_text}
             )
             
@@ -1289,7 +1289,7 @@ async def admin_send_anonymous_final(message: types.Message, state: FSMContext, 
                 """
                 INSERT INTO anon_messages (sender_id, receiver_id, text, timestamp, is_revealed)
                 VALUES (:sender_id, :receiver_id, :message_text, datetime('now'), 0)
-                """,  # ИСПРАВЛЕНО: text вместо message_text
+                """,  
                 {"sender_id": sender_id, "receiver_id": receiver_id, "message_text": message_text}
             )
             
@@ -1476,7 +1476,7 @@ async def debug_conversation_command(message: types.Message):
                 am.id,
                 am.sender_id,
                 am.receiver_id,
-                am.text,  # ИСПРАВЛЕНО: было am.message_text
+                am.text, 
                 am.timestamp
             FROM anon_messages am
             WHERE (am.sender_id = :user1_id AND am.receiver_id = :user2_id)
@@ -1532,7 +1532,7 @@ async def check_messages_command(message: types.Message):
                 am.id,
                 am.sender_id,
                 am.receiver_id,
-                am.text,  # ИСПРАВЛЕНО: было am.message_text
+                am.text, 
                 am.timestamp,
                 u1.first_name as sender_name,
                 u2.first_name as receiver_name
